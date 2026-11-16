@@ -44,6 +44,8 @@ file(GLOB_RECURSE SUPER3_SOURCES
 list(FILTER SUPER3_SOURCES EXCLUDE REGEX
   "/Src/(Graphics|Debugger|Model1|Model2|Pro1000)/|/Src/OSD/(SDL|Windows|OSX|Unix)/|/Src/OSD/(ConsoleInput|Test_[^/]*)\\.cpp$|/Src/Pkgs/(GL|imgui)/|/Src/Pkgs/glew\\.c$|/Src/CPU/(V60|SHARC|I960|MB86233|MB86235)/|/Src/CPU/68K/Musashi/(m68k_in|m68kmake)\\.c$|/Src/CPU/68K/Turbo68K/|/Src/CPU/PowerPC/(ppc603|ppc_ops)\\.c$|/Src/CPU/PowerPC/PPCDisasm\\.cpp$|/Src/Model3/(53C810Disasm|Model3GraphicsState)\\.cpp$|/Src/Sound/SCSPLFO\\.cpp$|/Src/Sound/MultiPCM\\.cpp$|/Src/Util/Test_[^/]*$")
 
+file(GLOB UPSTREAM_NEW3D_SOURCES "${REPO_ROOT}/Src/Graphics/New3D/*.cpp")
+
 # --- SDL2 (for future Android OSD wiring) ---
 # Prefer a local checkout if provided via -DSDL2_LOCAL_DIR, otherwise fetch the
 # latest release tarball.
@@ -92,22 +94,13 @@ add_library(super3 SHARED
   android_input_system.cpp
   gles_presenter.cpp
   render2d_android.cpp
+  gles_compat.cpp
+  # Upstream's New3D renderer, built for OpenGL ES 3.2 through override/GL/glew.h
+  "${REPO_ROOT}/Src/Graphics/Shader.cpp"
+  ${UPSTREAM_NEW3D_SOURCES}
   "${REPO_ROOT}/Src/OSD/SDL/Audio.cpp"
   "${REPO_ROOT}/Src/OSD/Unix/FileSystemPath.cpp"
   "${M68K_GENERATED_DIR}/UpstreamDefaultConfig.cpp"
-  New3D/Mat4.cpp
-  New3D/GLSLShader.cpp
-  New3D/Model.cpp
-  New3D/New3D.cpp
-  New3D/PolyHeader.cpp
-  New3D/R3DFloat.cpp
-  New3D/R3DFrameBuffers.cpp
-  New3D/R3DShader.cpp
-  New3D/R3DScrollFog.cpp
-  New3D/Texture.cpp
-  New3D/TextureSheet.cpp
-  New3D/VBO.cpp
-  New3D/Vec.cpp
   ${SUPER3_SOURCES}
   ${M68K_GENERATED_SOURCES}
 )
@@ -120,7 +113,6 @@ set_source_files_properties("${REPO_ROOT}/Src/CPU/68K/Musashi/m68kcpu.c" PROPERT
 
 target_include_directories(super3 PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/override"
-  "${CMAKE_CURRENT_LIST_DIR}"
   "${REPO_ROOT}/Src"
   "${REPO_ROOT}/Src/CPU/68K/Musashi"
   "${REPO_ROOT}/Src/OSD"

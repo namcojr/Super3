@@ -78,6 +78,7 @@
     <!-- Daytona Timing -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btn_daytona_timing"
+        android:visibility="gone"
         style="@style/Widget.Material3.Button.TextButton.Icon"
         android:layout_width="match_parent"
         android:layout_height="56dp"

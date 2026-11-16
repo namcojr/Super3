@@ -10,11 +10,11 @@
 #ifndef INCLUDED_RENDER2D_H
 #define INCLUDED_RENDER2D_H
 
-#include <GLES3/gl3.h>
+#include <GLES3/gl32.h>
 #include <memory>
 #include "Supermodel.h"
 #include "Util/NewConfig.h"
-#include "New3D/GLSLShader.h"
+#include "Graphics/New3D/GLSLShader.h"
 #include "Model3/TileGenBuffer.h"
 #include "Graphics/IRender2D.h"
 

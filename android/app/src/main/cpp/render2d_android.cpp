@@ -1,9 +1,9 @@
 /*
  * OpenGL ES 3.0 port of upstream Src/Graphics/Render2D.cpp.
  *
- * Mirrors upstream behaviour line for line, but compiles upstream's own 2D
- * shaders (Src/Graphics/Shaders2D.h) as GLSL ES, so upstream shader changes
- * (upscale filters etc.) are picked up on every sync.
+ * Mirrors upstream behaviour line for line and compiles upstream's own 2D
+ * shaders (Src/Graphics/Shaders2D.h; converted to GLSL ES by gles_compat.cpp),
+ * so upstream shader changes (upscale filters etc.) come with every sync.
  */
 
 #include "Graphics/Render2D.h"
@@ -11,24 +11,6 @@
 #include "OSD/Logger.h"
 
 #include <string>
-
-namespace
-{
-  // Turn an upstream desktop "#version 410 core" shader into GLSL ES 3.00.
-  std::string ToGLES(std::string src)
-  {
-    const std::string desktop = "#version 410 core";
-    const std::string gles = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;";
-    size_t pos = src.find(desktop);
-    if (pos != std::string::npos)
-      src.replace(pos, desktop.size(), gles);
-    // GLSL ES requires #version on the very first line.
-    pos = src.find("#version");
-    if (pos != std::string::npos)
-      src.erase(0, pos);
-    return src;
-  }
-}
 
 void CRender2D::Setup2D(bool isBottom)
 {
@@ -113,8 +95,9 @@ Result CRender2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsign
   m_upscaleMode = (m_xPixels == 496 && m_yPixels == 384) ? UpscaleMode::Nearest : upscaleMode;
 
   std::string um = "#define UPSCALEMODE " + std::to_string((int)m_upscaleMode) + '\n';
-  std::string vs = ToGLES(s_vertexShader);
-  std::string fs = ToGLES(std::string(s_fragmentShaderHeader)) + um + s_fragmentShader;
+  // Upstream's desktop shaders; gles_compat.cpp converts them to GLSL ES when compiled
+  std::string vs = s_vertexShader;
+  std::string fs = std::string(s_fragmentShaderHeader) + um + s_fragmentShader;
 
   m_drawShader.UnloadShaders();
   m_drawShader.LoadShaders(vs.c_str(), fs.c_str());

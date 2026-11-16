@@ -11,7 +11,7 @@
 #include <thread>
 #include <cstring>
 
-#include <GLES3/gl3.h>
+#include <GLES3/gl32.h>
 
 #include "GameLoader.h"
 #include "Model3/Model3.h"
@@ -34,7 +34,7 @@
 #include "android_input_system.h"
 #include "android_osd.h"
 #include "gles_presenter.h"
-#include "New3D/New3D.h"
+#include "Graphics/New3D/New3D.h"
 
 // Upstream DefaultConfig() (generated/UpstreamDefaultConfig.cpp)
 Util::Config::Node UpstreamDefaultConfig();
@@ -1018,6 +1018,7 @@ extern "C" int SDL_main(int argc, char* argv[]) {
 
   bool running = true;
   uint32_t lastStatusLog = SDL_GetTicks();
+  unsigned framesSinceLog = 0;
   bool backgrounded = false;
   bool loggedControls = false;
   bool audioOpened = false;
@@ -1159,9 +1160,11 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     }
 
     uint32_t t = SDL_GetTicks();
+    framesSinceLog++;
     if (t - lastStatusLog > 2000) {
+      SDL_Log("Main loop alive; loadState=%d fps=%.1f", state, framesSinceLog * 1000.0 / (t - lastStatusLog));
       lastStatusLog = t;
-      SDL_Log("Main loop alive; loadState=%d", state);
+      framesSinceLog = 0;
     }
   }
 
