@@ -25,7 +25,8 @@ android {
   ndkVersion = "29.0.14206865"
 
   defaultConfig {
-    applicationId = "com.izzy2lost.super3"
+    // Own app ID: installs alongside SUPER3 from the Play Store (code namespace stays com.izzy2lost.super3)
+    applicationId = "com.namco.super3"
     minSdk = 26
     targetSdk = 36
 
@@ -65,12 +66,12 @@ android {
         signingConfig = signingConfigs.getByName("release")
       }
     }
-    // Personal build: optimized like release, but installs alongside the Play
-    // Store app (separate app ID, debug-key signed). Name comes from src/personal/res.
+    // Personal build: optimized like release, debug-key signed. Name comes from src/personal/res.
+    // -Pmigrate makes it debuggable, so settings can be copied with "adb shell run-as".
     create("personal") {
       initWith(getByName("release"))
-      applicationIdSuffix = ".dev"
       versionNameSuffix = "-personal"
+      isDebuggable = project.hasProperty("migrate")
       signingConfig = signingConfigs.getByName("debug")
       matchingFallbacks += listOf("release")
     }
