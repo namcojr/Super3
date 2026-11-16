@@ -1,8 +1,29 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef INCLUDED_INPUTTYPES_H
 #define INCLUDED_INPUTTYPES_H
 
 #include "Types.h"
 #include "Input.h"
+#include <memory>
 
 // All the input subclasses have been grouped together here as they are very simple classes
 
@@ -28,12 +49,12 @@ public:
 	/*
 	 * Returns true if the input was pressed during last update (ie currently on but previously off)
 	 */
-	bool Pressed();
+	bool Pressed() const;
 
 	/*
 	 * Returns true if the input was released duing last update (ie currently off but previously on)
 	 */
-	bool Released();
+	bool Released() const;
 };
 
 /*
@@ -58,12 +79,12 @@ public:
 	/*
 	 * Returns true if the input is currently activated
 	 */
-	bool HasValue();
+	bool HasValue() const;
 
 	/*
 	 * Returns current value as a fraction 0.0 to 1.0 of the full range
 	 */
-	double ValueAsFraction();
+	double ValueAsFraction() const;
 };
 
 /*
@@ -75,8 +96,8 @@ class CAxisInput : public CInput
 {
 private:
 	// Analog inputs that represent the negative and positive range of the axis
-	CAnalogInput *m_negInput;
-	CAnalogInput *m_posInput;
+	std::shared_ptr<CAnalogInput> m_negInput;
+	std::shared_ptr<CAnalogInput> m_posInput;
 
 	// Min, off and max values
 	UINT16 m_minVal;
@@ -84,7 +105,7 @@ private:
 	UINT16 m_maxVal;
 	
 public:
-	CAxisInput(const char *inputId, const char *inputLabel, unsigned inputGameFlags, const char *defaultMapping, CAnalogInput *negInput, CAnalogInput *posInput,
+	CAxisInput(const char *inputId, const char *inputLabel, unsigned inputGameFlags, const char *defaultMapping, std::shared_ptr<CAnalogInput> negInput, std::shared_ptr<CAnalogInput> posInput,
 		UINT16 minVal = 0x00, UINT16 offVal = 0x80, UINT16 maxVal = 0xFF);
 
 	/*
@@ -95,12 +116,12 @@ public:
 	/*
 	 * Returns true if the input is currently activated (ie axis is not centered)
 	 */
-	bool HasValue();
+	bool HasValue() const;
 
 	/*
 	 * Returns current value as a fraction -1.0 to 1.0
 	 */ 
-	double ValueAsFraction();
+	double ValueAsFraction() const;
 };
 
 /*
@@ -112,20 +133,20 @@ class CGearShift4Input : public CInput
 {
 private:
 	// Five switch inputs for gears 1-4 and N
-	CSwitchInput *m_shift1Input;
-	CSwitchInput *m_shift2Input;
-	CSwitchInput *m_shift3Input;
-	CSwitchInput *m_shift4Input;
-	CSwitchInput *m_shiftNInput;
+	std::shared_ptr<CSwitchInput> m_shift1Input;
+	std::shared_ptr<CSwitchInput> m_shift2Input;
+	std::shared_ptr<CSwitchInput> m_shift3Input;
+	std::shared_ptr<CSwitchInput> m_shift4Input;
+	std::shared_ptr<CSwitchInput> m_shiftNInput;
 
 	// Two switch inputs for up/down gear
-	CSwitchInput *m_shiftUpInput;
-	CSwitchInput *m_shiftDownInput;
+	std::shared_ptr<CSwitchInput> m_shiftUpInput;
+	std::shared_ptr<CSwitchInput> m_shiftDownInput;
 
 public:
 	CGearShift4Input(const char *inputId, const char *inputLabel, unsigned inputGameFlags,
-		CSwitchInput *shift1Input, CSwitchInput *shift2Input, CSwitchInput *shift3Input, CSwitchInput *shift4Input, CSwitchInput *shiftNInput, 
-		CSwitchInput *shiftUpInput, CSwitchInput *shiftDownInput);
+		std::shared_ptr<CSwitchInput> shift1Input, std::shared_ptr<CSwitchInput> shift2Input, std::shared_ptr<CSwitchInput> shift3Input, std::shared_ptr<CSwitchInput> shift4Input, std::shared_ptr<CSwitchInput> shiftNInput,
+		std::shared_ptr<CSwitchInput> shiftUpInput, std::shared_ptr<CSwitchInput> shiftDownInput);
 
 	/*
 	 * Polls (updates) the input, updating its value from the switch inputs
@@ -142,8 +163,8 @@ class CTriggerInput : public CInput
 {
 private:
 	// Real trigger and offscreen inputs
-	CSwitchInput *m_triggerInput;
-	CSwitchInput *m_offscreenInput;
+	std::shared_ptr<CSwitchInput> m_triggerInput;
+	std::shared_ptr<CSwitchInput> m_offscreenInput;
 	
 	// Offscreen on and off values
 	UINT16 m_offVal;
@@ -156,7 +177,7 @@ public:
 	// Offscreen value
 	UINT16 offscreenValue;
 
-	CTriggerInput(const char *inputId, const char *inputLabel, unsigned inputGameFlags, CSwitchInput *triggerInput, CSwitchInput *offscreenInput,
+	CTriggerInput(const char *inputId, const char *inputLabel, unsigned inputGameFlags, std::shared_ptr<CSwitchInput> triggerInput, std::shared_ptr<CSwitchInput> offscreenInput,
 		UINT16 offVal = 0x00, UINT16 onVal = 0x01);
 
 	void LoadFromConfig(const Util::Config::Node &config);

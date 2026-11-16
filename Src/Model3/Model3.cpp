@@ -1,8 +1,7 @@
 /**
  ** Supermodel
  ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011-2021 Bart Trzynadlowski, Nik Henson, Ian Curtis,
- **                     Harry Tuttle, and Spindizzi
+ ** Copyright 2003-2026 The Supermodel Team
  **
  ** This file is part of Supermodel.
  **
@@ -48,6 +47,9 @@
  * 90000000-9000000B  Real3D VROM Texture Port
  * 94000000-940FFFFF  Real3D Texture FIFO
  * 98000000-980FFFFF  Real3D Polygon RAM
+ * C0000000-C000FFFF  Netboard Shared RAM (Step 1.5+)
+ * C0010000-C00101FF  Netboard Registers (Step 1.5+)
+ * C0020000-C002FFFF  Netboard Program RAM (Step 1.5+)
  * C0000000-C00000FF  SCSI (Step 1.x)
  * C1000000-C10000FF  SCSI (Step 1.x) (Lost World expects it here)
  * C2000000-C20000FF  Real3D DMA (Step 2.x)
@@ -86,14 +88,14 @@
  * F0100014: IRQ Enable
  *   7   6   5   4   3   2   1   0
  * +---+---+---+---+---+---+---+---+
- * | ? |SND| ? |NET|VD3|VD2|VBL|VD0|
+ * | ? |SND| ? |NET|VGP|VDP|VBL|VD0|
  * +---+---+---+---+---+---+---+---+
  *    SND   SCSP (sound)
  *    NET   Network
- *    VD3   Unknown video-related
- *    VD2   Unknown video-related
+ *    VGP   GP done (geometry processing)
+ *    VDP   DP done (display processing)
  *    VBL   VBlank start
- *    VD0   Unknown video-related (?)
+ *    VD0   Unknown video-related
  *    0 = Disable, 1 = Enable
  *
  * Game Buttons
@@ -212,21 +214,23 @@
 
 #include "Model3.h"
 
+#include <chrono>
+#include <system_error>
+
 #include <new>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include "Supermodel.h"
-#include "DriveBoard/BillBoard.h"
+#include "BillBoard.h"
 #include "DriveBoard/JoystickBoard.h"
 #include "DriveBoard/SkiBoard.h"
 #include "DriveBoard/WheelBoard.h"
 #include "Game.h"
 #include "ROMSet.h"
-#ifdef NET_BOARD
-#include "Network/NetBoard.h"
-#include "Network/SimNetBoard.h"
-#endif // NET_BOARD
+#include "Model3/NetBoard.h"
+#include "Model3/SimNetBoard.h"
+#include "SDLIncludes.h"
 #include "OSD/Audio.h"
 #include "OSD/Video.h"
 #include "Util/Format.h"
@@ -450,6 +454,15 @@ UINT8 CModel3::ReadInputs(unsigned reg)
     {
       data &= ~(Inputs->analogTriggerLeft[0]->value<<0);
       data &= ~(Inputs->analogTriggerRight[0]->value<<1);
+      if (m_game.name == "lostwsga" || m_game.name == "lostwsgp")
+      {
+        const int border = 255 / 100;
+        const bool nearEdge = Inputs->analogGunX[0]->value <= border || Inputs->analogGunX[0]->value >= 255 - border ||
+          Inputs->analogGunY[0]->value <= border || Inputs->analogGunY[0]->value >= 255 - border;
+        if (nearEdge && !m_lostWorldReloaded[0])
+          data &= ~2;
+        m_lostWorldReloaded[0] = nearEdge;
+      }
     }
 
     if ((m_game.inputs & Game::INPUT_MAGTRUCK))
@@ -481,11 +494,8 @@ UINT8 CModel3::ReadInputs(unsigned reg)
 
     data = 0xFF;
 
-    if (DriveBoard->IsAttached() && DriveBoard->GetType() != Game::DRIVE_BOARD_BILLBOARD)
-    {
-      // If driveboard is set as billboard, don't read BillBoard reg (no inputs)
+    if (DriveBoard->IsAttached())
       data = DriveBoard->Read();
-    }
 
     if ((m_game.inputs & Game::INPUT_JOYSTICK2))
     {
@@ -547,6 +557,15 @@ UINT8 CModel3::ReadInputs(unsigned reg)
     {
       data &= ~(Inputs->analogTriggerLeft[1]->value<<0);
       data &= ~(Inputs->analogTriggerRight[1]->value<<1);
+      if (m_game.name == "lostwsga" || m_game.name == "lostwsgp")
+      {
+        const int border = 255 / 100;
+        const bool nearEdge = Inputs->analogGunX[1]->value <= border || Inputs->analogGunX[1]->value >= 255 - border ||
+          Inputs->analogGunY[1]->value <= border || Inputs->analogGunY[1]->value >= 255 - border;
+        if (nearEdge && !m_lostWorldReloaded[1])
+          data &= ~2;
+        m_lostWorldReloaded[1] = nearEdge;
+      }
     }
 
     if ((m_game.inputs & Game::INPUT_MAGTRUCK))
@@ -556,6 +575,10 @@ UINT8 CModel3::ReadInputs(unsigned reg)
 
   case 0x18:         // swtrilgy and getbass. Remove IO board error on getbass. Not sure, but may be related to device feedback ?
       data = 0x7f;   // Note : when this returned value is wrong, there is a side effect on Ocean Hunter game, a sort of 3d interlaced effect
+      if (m_game.name == "bassdx" || m_game.name == "getbassdx" || m_game.name == "getbass")  // Prevent I/O erreur after a while (related to tension)
+      {
+          data = 0x01;
+      }
       return data;
 
   case 0x2C:  // Serial FIFO 1
@@ -603,7 +626,7 @@ UINT8 CModel3::ReadInputs(unsigned reg)
   	  // probably to allow users to define inverted controls for this game only,
   	  // which means the input system must support loading per-game config (not
   	  // all analog_gun games require axis inversion to be playable).
-	  if (m_game.name == "lostwsga" || m_game.name == "lostwsgo")
+      if (m_game.name == "lostwsga" || m_game.name == "lostwsgp")
 	  { // to do, not a string compare
         adc[0] =       (UINT8)Inputs->analogGunX[0]->value; // order is different for some reason in lost world
         adc[1] = 255 - (UINT8)Inputs->analogGunY[0]->value; // why are values inverted? is this the wrong place to fix this
@@ -655,9 +678,11 @@ void CModel3::WriteInputs(unsigned reg, UINT8 data)
     inputBank = data;
     break;
 
-  case 0x10:  // Drive board
+  case 0x10:  // Drive board or billboard
     if (DriveBoard->IsAttached())
       DriveBoard->Write(data);
+    if (BillBoard->IsAttached())
+      BillBoard->Write(data);
     if (NULL != Outputs) // TODO - check gameInputs
       Outputs->SetValue(OutputRawDrive, data);
     OutputRegister[0] = data;
@@ -716,6 +741,16 @@ void CModel3::WriteInputs(unsigned reg, UINT8 data)
           break;
         case 8: // Off-screen indicator (bit 0 = player 1, bit 1 = player 2, set indicates off screen)
           serialFIFO2 = (Inputs->trigger[1]->offscreenValue<<1)|Inputs->trigger[0]->offscreenValue;
+          if (m_game.name == "lostwsga" || m_game.name == "lostwsgp")
+          {
+            const int border = 255 / 100;
+            const auto nearEdge = [border](const auto &x, const auto &y)
+            {
+              return x <= border || x >= 255 - border || y <= border || y >= 255 - border;
+            };
+            serialFIFO2 |= nearEdge(Inputs->analogGunX[0]->value, Inputs->analogGunY[0]->value) ? 1 : 0;
+            serialFIFO2 |= nearEdge(Inputs->analogGunX[1]->value, Inputs->analogGunY[1]->value) ? 2 : 0;
+          }
           break;
         default:
           DebugLog("Unknown gun register: %X\n", gunReg);
@@ -813,7 +848,7 @@ void CModel3::WriteSecurity(unsigned reg, UINT32 data)
  Unknown PCI devices are handled here.
 ******************************************************************************/
 
-UINT32 CModel3::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset)
+UINT32 CModel3::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset) const
 {
   if ((bits==8) || (bits==16))
   {
@@ -831,6 +866,7 @@ UINT32 CModel3::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits,
     default:
       break;
     }
+    break;
   default:
     break;
   }
@@ -861,7 +897,7 @@ void CModel3::SetCROMBank(unsigned idx)
   DebugLog("CROM bank setting: %d (%02X), PC=%08X, LR=%08X\n", idx, cromBankReg, ppc_get_pc(), ppc_get_lr());
 }
 
-UINT8 CModel3::ReadSystemRegister(unsigned reg)
+UINT8 CModel3::ReadSystemRegister(unsigned reg) const
 {
   switch (reg&0x3F)
   {
@@ -941,6 +977,10 @@ UINT8 CModel3::Read8(UINT32 addr)
   if (addr<0x00800000)
     return ram[addr^3];
 
+  // Reads over the bus wait for posted tile generator writes (tile generator reads are timed by TileGen itself)
+  if ((addr - 0xF1000000) >= 0x00200000)
+    ppc_add_cycles(TileGen.BusReadCycles(ppc_total_cycles()));
+
   // Other
   switch ((addr >> 24))
   {
@@ -1003,56 +1043,46 @@ UINT8 CModel3::Read8(UINT32 addr)
     if (addr < 0xF1120000)
     {
       // Tile generator accesses its RAM as little endian, no adjustment needed here
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), false, addr < 0xF1100000));
       return TileGen.ReadRAM8(addr & 0x1FFFFF);
     }
     break;
 
   // 53C810 SCSI
-  case 0xC0:  // only on Step 1.0
-#ifndef NET_BOARD
-    if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0)
+  case 0xC0:  // only on Step 1.x
+    if (m_runNetBoard)
     {
-      //printf("Model3 : Read8 %x\n", addr);
-      break;
-    }
-#endif
-#ifdef NET_BOARD
-  if (m_runNetBoard)
-  {
-    switch ((addr & 0x3ffff) >> 16)
-    {
-    case 0:
-      return NetBoard->ReadCommRAM8((addr & 0xFFFF) ^ 2);
-
-    case 1: // ioreg 32bits access in 16bits environment
-      if (addr > 0xc00101ff)
+      switch ((addr & 0x3ffff) >> 16)
       {
+      case 0:
+        return NetBoard->ReadCommRAM8((addr & 0xFFFF) ^ 2);
+
+      case 1: // ioreg 32bits access in 16bits environment
+        if (addr > 0xc00101ff)
+        {
+          printf("R8 ATTENTION OUT OF RANGE\n");
+          SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
+        }
+        return (UINT8)NetBoard->ReadIORegister((addr & 0x1FF) / 2);
+
+      case 2:
+      case 3:
+        return netRAM[((addr & 0x1FFFF) / 2)];
+
+      default:
         printf("R8 ATTENTION OUT OF RANGE\n");
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
+        break;
       }
-      return (UINT8)NetBoard->ReadIORegister((addr & 0x1FF) / 2);
-
-    case 2:
-    case 3:
-      return netRAM[((addr & 0x1FFFF) / 2)];
-
-    default:
-      printf("R8 ATTENTION OUT OF RANGE\n");
-      SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "Out of Range", NULL);
-      break;
     }
-  }
-  else if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0) break;
-#endif
+  else if (m_stepping > Game::Stepping::MODEL3_1_5 || SCSI.GetBaseAddress() != 0xC0) break;
   case 0xF9:
   case 0xC1:
     return SCSI.ReadRegister(addr&0xFF);
 
   // Unknown
   default:
-#ifdef NET_BOARD
     printf("CMODEL3 : unknown R8 : %x\n", addr >> 24);
-#endif
     break;
   }
 
@@ -1074,6 +1104,10 @@ UINT16 CModel3::Read16(UINT32 addr)
   // RAM (most frequently accessed)
   if (addr<0x00800000)
     return *(UINT16 *) &ram[addr^2];
+
+  // Reads over the bus wait for posted tile generator writes (tile generator reads are timed by TileGen itself)
+  if ((addr - 0xF1000000) >= 0x00200000)
+    ppc_add_cycles(TileGen.BusReadCycles(ppc_total_cycles()));
 
   // Other
   switch ((addr>>24))
@@ -1103,7 +1137,9 @@ UINT16 CModel3::Read16(UINT32 addr)
 
     // MPC105
     case 0xC0:  // F0C00CF8
-      return PCIBridge.ReadPCIConfigData(16,addr&3);
+      if (PCIBridge.GetModel() == 0x105)
+        return PCIBridge.ReadPCIConfigData(16,addr&3);
+      break;
 
     // MPC106
     case 0xE0:
@@ -1122,7 +1158,9 @@ UINT16 CModel3::Read16(UINT32 addr)
     case 0xED:
     case 0xEE:
     case 0xEF:
-      return PCIBridge.ReadPCIConfigData(16,addr&3);
+      if (PCIBridge.GetModel() == 0x106)
+        return PCIBridge.ReadPCIConfigData(16,addr&3);
+      break;
 
     // Unknown
     default:
@@ -1137,13 +1175,13 @@ UINT16 CModel3::Read16(UINT32 addr)
     if (addr < 0xF1120000)
     {
       // Tile generator accesses its RAM as little endian, no adjustment needed here
-      uint16_t data = TileGen.ReadRAM16(addr&0x1FFFFF);
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), false, addr < 0xF1100000));
+      data = TileGen.ReadRAM16(addr&0x1FFFFF);
       return FLIPENDIAN16(data);
     }
     break;
 
-#ifdef NET_BOARD
-  case 0xc0: // spikeout call this
+  case 0xc0: // spikeout calls this
   // interesting : poking @4 master to same value as slave (0x100) or simply !=0 -> connected and go in game, but freeze (prints comm error) as soon as players appear after the gate
   // sort of sync ack ? who writes this 16b value ?
   {
@@ -1158,13 +1196,11 @@ UINT16 CModel3::Read16(UINT32 addr)
       break;
     }
   }
-#endif
+  break;
   // Unknown
   default:
-#ifdef NET_BOARD
     printf("CMODEL3 : unknown R16 : %x (%x)\n", addr, addr >> 24);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Info", "CMODEL3 : Unknown R16", NULL);
-#endif
     break;
   }
 
@@ -1186,6 +1222,10 @@ UINT32 CModel3::Read32(UINT32 addr)
   // RAM (most frequently accessed)
   if (addr < 0x00800000)
     return *(UINT32 *) &ram[addr];
+
+  // Reads over the bus wait for posted tile generator writes (tile generator reads are timed by TileGen itself)
+  if ((addr - 0xF1000000) >= 0x00200000)
+    ppc_add_cycles(TileGen.BusReadCycles(ppc_total_cycles()));
 
   // Other
   switch ((addr>>24))
@@ -1241,7 +1281,9 @@ UINT32 CModel3::Read32(UINT32 addr)
 
     // MPC105
     case 0xC0:  // F0C00CF8
-      return PCIBridge.ReadPCIConfigData(32,0);
+      if (PCIBridge.GetModel() == 0x105)
+        return PCIBridge.ReadPCIConfigData(32,0);
+      break;
 
     // MPC106
     case 0xE0:
@@ -1260,7 +1302,9 @@ UINT32 CModel3::Read32(UINT32 addr)
     case 0xED:
     case 0xEE:
     case 0xEF:
-      return PCIBridge.ReadPCIConfigData(32,0);
+      if (PCIBridge.GetModel() == 0x106)
+        return PCIBridge.ReadPCIConfigData(32,0);
+      break;
 
     // RTC
     case 0x14:
@@ -1290,6 +1334,7 @@ UINT32 CModel3::Read32(UINT32 addr)
     // Tile generator accesses its RAM as little endian, must flip for big endian PowerPC
     if (addr < 0xF1120000)
     {
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), false, addr < 0xF1100000));
       data = TileGen.ReadRAM32(addr&0x1FFFFF);
       return FLIPENDIAN32(data);
     }
@@ -1302,12 +1347,7 @@ UINT32 CModel3::Read32(UINT32 addr)
     break;
 
   // 53C810 SCSI
-  case 0xC0:  // only on Step 1.0
-#ifndef NET_BOARD
-    if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0) // check for Step 1.x
-      break;
-#endif
-#ifdef NET_BOARD
+  case 0xC0:  // only on Step 1.x
     if (m_runNetBoard)
     {
       UINT32 result;
@@ -1339,8 +1379,7 @@ UINT32 CModel3::Read32(UINT32 addr)
       }
 
     }
-    else if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0) break;
-#endif
+    else if (m_stepping > Game::Stepping::MODEL3_1_5 || SCSI.GetBaseAddress() != 0xC0) break;
   case 0xF9:
   case 0xC1:
     data =  (SCSI.ReadRegister((addr+0)&0xFF) << 24);
@@ -1351,9 +1390,7 @@ UINT32 CModel3::Read32(UINT32 addr)
 
   // Unknown
   default:
-#ifdef NET_BOARD
     printf("CMODEL3 : unknown R32 : %x\n", addr >> 24);
-#endif
     break;
   }
 
@@ -1415,6 +1452,7 @@ void CModel3::Write8(UINT32 addr, UINT8 data)
       {
         SoundBoard.WriteMIDIPort(data);
         IRQ.Deassert(0x40);
+        midiAckCycle = ppc_total_cycles();
       }
       else if ((addr & 0xF) == 4) // MIDI control port
       {
@@ -1455,23 +1493,20 @@ void CModel3::Write8(UINT32 addr, UINT8 data)
     if (addr < 0xF1120000)
     {
       // Tile generator accesses its RAM as little endian, no adjustment needed here
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), true, addr < 0xF1100000));
       TileGen.WriteRAM8(addr&0x1FFFFF, data);
       break;
     }
     goto Unknown8;
 
-  // MPC105/106
+  // MPC105
   case 0xF8:
-    PCIBridge.WriteRegister(addr&0xFF,data);
+    if (PCIBridge.GetModel() == 0x105)
+      PCIBridge.WriteRegister(addr&0xFF,data);
     break;
 
   // 53C810 SCSI
-  case 0xC0:  // only on Step 1.0
-#ifndef NET_BOARD
-    if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0)
-      goto Unknown8;
-#endif
-#ifdef NET_BOARD
+  case 0xC0:  // only on Step 1.x
     if (m_runNetBoard)
     {
       //printf("CModel 3 : write8 %x<-%x\n", addr, data);
@@ -1503,8 +1538,7 @@ void CModel3::Write8(UINT32 addr, UINT8 data)
 
       break;
     }
-    else if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0) break;
-#endif
+    else if (m_stepping > Game::Stepping::MODEL3_1_5 || SCSI.GetBaseAddress() != 0xC0) break;
   case 0xF9:
   case 0xC1:
     SCSI.WriteRegister(addr&0xFF,data);
@@ -1513,9 +1547,7 @@ void CModel3::Write8(UINT32 addr, UINT8 data)
   // Unknown:
   default:
   Unknown8:
-#ifdef NET_BOARD
     //printf("CMODEL3 : unknown W8 : %x\n", addr >> 24); // harleyb unknown 0xF1
-#endif
     DebugLog("PC=%08X\twrite8 : %08X=%02X\n", ppc_get_pc(), addr, data);
     break;
   }
@@ -1559,7 +1591,8 @@ void CModel3::Write16(UINT32 addr, UINT16 data)
 
     // MPC105
     case 0xC0:  // F0C00CF8
-      PCIBridge.WritePCIConfigData(16,addr&2,data);
+      if (PCIBridge.GetModel() == 0x105)
+        PCIBridge.WritePCIConfigData(16,addr&2,data);
       break;
 
     // Unknown
@@ -1576,21 +1609,23 @@ void CModel3::Write16(UINT32 addr, UINT16 data)
     if (addr < 0xF1120000)
     {
       // Tile generator accesses its RAM as little endian, no adjustment needed here
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), true, addr < 0xF1100000));
       TileGen.WriteRAM16(addr&0x1FFFFF, FLIPENDIAN16(data));
     }
     goto Unknown16;
 
-  // MPC105/106
+  // MPC105
   case 0xF8:
-    // Write in big endian order, like a real PowerPC
-    PCIBridge.WriteRegister((addr&0xFF)+0,data>>8);
-    PCIBridge.WriteRegister((addr&0xFF)+1,data&0xFF);
+    if (PCIBridge.GetModel() == 0x105)
+    {
+      // Write in big endian order, like a real PowerPC
+      PCIBridge.WriteRegister((addr&0xFF)+0,data>>8);
+      PCIBridge.WriteRegister((addr&0xFF)+1,data&0xFF);
+    }
     break;
 
-#ifdef NET_BOARD
   case 0xC0: // skichamp only
     //printf("CModel 3 : write16 %x<-%x\n", addr, data);
-
 
     switch ((addr & 0x3ffff) >> 16)
     {
@@ -1604,7 +1639,6 @@ void CModel3::Write16(UINT32 addr, UINT16 data)
     }
 
     break;
-#endif
 
   // Unknown
   default:
@@ -1665,7 +1699,7 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
 
   // Real3D configuration registers
   case 0x9C:  // 9Cxxxxxx
-    //printf("%08X=%08X\n", addr, data);  //TODO: flip endian?
+    GPU.WriteConfigurationRegister(addr, FLIPENDIAN32(data));
     break;
 
   // Real3D DMA
@@ -1699,8 +1733,9 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
       break;
 
     // MPC105
-    case 0x80:  // F0800CF8 (never observed at 0xFExxxxxx)
-      PCIBridge.WritePCIConfigAddress(data);
+    case 0x80:  // F0800CF8
+      if (PCIBridge.GetModel() == 0x105)
+        PCIBridge.WritePCIConfigAddress(data);
       break;
 
     // MPC105/106
@@ -1720,11 +1755,11 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
     case 0xCD: case 0xDD: case 0xED:
     case 0xCE: case 0xDE: case 0xEE:
     case 0xCF: case 0xDF: case 0xEF:
-      if ((addr>=0xF0C00CF8) && (addr<0xF0C00D00))    // MPC105
+      if ((PCIBridge.GetModel() == 0x105) && (addr>=0xF0C00CF8) && (addr<0xF0C00D00))    // MPC105
         PCIBridge.WritePCIConfigData(32,0,data);
-      else if ((addr>=0xFEC00000) && (addr<0xFEE00000)) // MPC106
+      else if ((PCIBridge.GetModel() == 0x106) && (addr>=0xFEC00000) && (addr<0xFEE00000)) // MPC106
         PCIBridge.WritePCIConfigAddress(data);
-      else if ((addr>=0xFEE00000) && (addr<0xFEF00000)) // MPC106
+      else if ((PCIBridge.GetModel() == 0x106) && (addr>=0xFEE00000) && (addr<0xFEF00000)) // MPC106
         PCIBridge.WritePCIConfigData(32,0,data);
       break;
 
@@ -1767,39 +1802,35 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
     {
       // Tile generator accesses its RAM as little endian, must flip for big endian PowerPC
       data = FLIPENDIAN32(data);
+      ppc_add_cycles(TileGen.BusAccessCycles(ppc_total_cycles(), true, addr < 0xF1100000));
       TileGen.WriteRAM32(addr&0x1FFFFF,data);
       break;
     }
     else if ((addr>=0xF1180000) && (addr<0xF1180100))
     {
-      UINT32 flipped = FLIPENDIAN32(data);
-      TileGen.WriteRegister(addr&0xFF, flipped);
-      if (addr == 0xF118000C) {
-        const bool legacyReal3D = m_config["LegacyReal3D"].ValueAsDefault<bool>(false);
-        if (!legacyReal3D)
-          GPU.TilegenDrawFrame(flipped);
+      TileGen.WriteRegister(addr&0xFF,FLIPENDIAN32(data));
+      if (addr == 0xf118000c) {
+        GPU.TilegenDrawFrame(FLIPENDIAN32(data));
       }
       break;
     }
 
     goto Unknown32;
 
-  // MPC105/106
-  case 0xF8:  // F8FFF000-F8FFF100
-    // Write in big endian order, like a real PowerPC
-    PCIBridge.WriteRegister((addr&0xFF)+0,(data>>24)&0xFF);
-    PCIBridge.WriteRegister((addr&0xFF)+1,(data>>16)&0xFF);
-    PCIBridge.WriteRegister((addr&0xFF)+2,(data>>8)&0xFF);
-    PCIBridge.WriteRegister((addr&0xFF)+3,data&0xFF);
+  // MPC105
+  case 0xF8:  // F8FFF000-F8FFF0FF
+    if (PCIBridge.GetModel() == 0x105)
+    {
+      // Write in big endian order, like a real PowerPC
+      PCIBridge.WriteRegister((addr&0xFF)+0,(data>>24)&0xFF);
+      PCIBridge.WriteRegister((addr&0xFF)+1,(data>>16)&0xFF);
+      PCIBridge.WriteRegister((addr&0xFF)+2,(data>>8)&0xFF);
+      PCIBridge.WriteRegister((addr&0xFF)+3,data&0xFF);
+    }
     break;
 
   // 53C810 SCSI
-  case 0xC0:  // step 1.0 only
-#ifndef NET_BOARD
-    if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0)
-      goto Unknown32;
-#endif
-#ifdef NET_BOARD
+  case 0xC0:  // step 1.x only
     if (m_runNetBoard)
     {
       UINT32 temp;
@@ -1831,8 +1862,7 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
 
       break;
     }
-    else if (m_stepping > 0x15 || SCSI.GetBaseAddress() != 0xC0) break;
-#endif
+    else if (m_stepping > Game::Stepping::MODEL3_1_5 || SCSI.GetBaseAddress() != 0xC0) break;
   case 0xF9:
   case 0xC1:
     SCSI.WriteRegister((addr&0xFF)+0,(data>>24)&0xFF);
@@ -1844,9 +1874,7 @@ void CModel3::Write32(UINT32 addr, UINT32 data)
   // Unknown
   default:
   Unknown32:
-#ifdef NET_BOARD
-      if (m_runNetBoard) printf("CMODEL3 : unknown W32 : %x (%x) data=%d\n", addr,addr >> 24,data);
-#endif
+    if (m_runNetBoard) printf("CMODEL3 : unknown W32 : %x (%x) data=%d\n", addr,addr >> 24,data);
     //printf("PC=%08X\twrite32: %08X=%08X\n", ppc_get_pc(), addr, data);
     DebugLog("PC=%08X\twrite32: %08X=%08X\n", ppc_get_pc(), addr, data);
     break;
@@ -1864,6 +1892,11 @@ void CModel3::Write64(UINT32 addr, UINT64 data)
 /******************************************************************************
  Emulation and Interface Functions
 ******************************************************************************/
+
+bool CModel3::SupportsSaveStates(void) const
+{
+  return true;
+}
 
 void CModel3::SaveState(CBlockFile *SaveState)
 {
@@ -1893,6 +1926,7 @@ void CModel3::SaveState(CBlockFile *SaveState)
   GPU.SaveState(SaveState);
   SoundBoard.SaveState(SaveState);  // also saves DSB state
   DriveBoard->SaveState(SaveState);
+  BillBoard->SaveState(SaveState);
   m_cryptoDevice.SaveState(SaveState);
   m_jtag.SaveState(SaveState);
 }
@@ -1932,6 +1966,7 @@ void CModel3::LoadState(CBlockFile *SaveState)
   ppc_load_state(SaveState);
   SoundBoard.LoadState(SaveState);
   DriveBoard->LoadState(SaveState);
+  BillBoard->LoadState(SaveState);
   m_cryptoDevice.LoadState(SaveState);
   m_jtag.LoadState(SaveState);
 }
@@ -1966,22 +2001,32 @@ void CModel3::ClearNVRAM(void)
   EEPROM.Clear();
 }
 
+// Milliseconds on a clock that only ever goes forward. For measuring intervals.
+static UINT32 GetTicks(void)
+{
+  return UINT32(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 void CModel3::RunFrame(void)
 {
-  UINT32 start = CThread::GetTicks();
+  UINT32 start = GetTicks();
 
   // See if currently running multi-threaded
   if (m_multiThreaded)
   {
     // If so, check all threads are up and running
     if (!StartThreads())
-      goto ThreadError;
+      return;
 
-    // Wake threads for PPC main board (if multi-threading GPU), sound board (if sync'd) and drive board (if attached) so they can process a frame
-    if ((m_gpuMultiThreaded       && !ppcBrdThreadSync->Post()) ||
-        (syncSndBrdThread         && !sndBrdThreadSync->Post()) ||
-        (DriveBoard->IsAttached()  && !drvBrdThreadSync->Post()))
-      goto ThreadError;
+    // Wake threads for PPC main board (if multi-threading GPU), sound board (if sync'd), drive board and billboard (if attached) so they can process a frame
+    if (m_gpuMultiThreaded)
+      ppcBrdThreadSync.Post();
+    if (syncSndBrdThread)
+      sndBrdThreadSync.Post();
+    if (DriveBoard->IsAttached())
+      drvBrdThreadSync.Post();
+    if (BillBoard->IsAttached())
+      bilBrdThreadSync.Post();
 
     // If not multi-threading GPU, then run PPC main board for a frame and sync GPUs now in this thread
     if (!m_gpuMultiThreaded)
@@ -1993,34 +2038,28 @@ void CModel3::RunFrame(void)
     // Render frame
     RenderFrame();
 
-    // Enter notify wait critical section
-    if (!notifyLock->Lock())
-      goto ThreadError;
-
-    // Wait for PPC main board, sound board and drive board threads to finish their work (if they are running and haven't finished already)
-    while ((m_gpuMultiThreaded      && !ppcBrdThreadDone) ||
-           (syncSndBrdThread        && !sndBrdThreadDone) ||
-           (DriveBoard->IsAttached() && !drvBrdThreadDone))
+    // Wait for PPC main board, sound board, drive board and billboard threads to finish their work (if they are running and haven't finished already)
     {
-      if (!notifySync->Wait(notifyLock))
-        goto ThreadError;
+      std::unique_lock<std::mutex> lock(notifyLock);
+      while ((m_gpuMultiThreaded      && !ppcBrdThreadDone) ||
+             (syncSndBrdThread        && !sndBrdThreadDone) ||
+             (DriveBoard->IsAttached() && !drvBrdThreadDone) ||
+             (BillBoard->IsAttached()  && !bilBrdThreadDone))
+      {
+        notifySync.wait(lock);
+      }
+      ppcBrdThreadDone = false;
+      sndBrdThreadDone = false;
+      drvBrdThreadDone = false;
+      bilBrdThreadDone = false;
     }
-    ppcBrdThreadDone = false;
-    sndBrdThreadDone = false;
-    drvBrdThreadDone = false;
-
-    // Leave notify wait critical section
-    if (!notifyLock->Unlock())
-      goto ThreadError;
 
     // If multi-threading GPU, then sync GPUs last while PPC main board thread is waiting
     if (m_gpuMultiThreaded)
       SyncGPUs();
 
-#ifdef NET_BOARD
     if (NetBoard->IsRunning() && m_config["SimulateNet"].ValueAs<bool>())
         RunNetBoardFrame();
-#endif
   }
   else
   {
@@ -2031,37 +2070,65 @@ void CModel3::RunFrame(void)
     RunSoundBoardFrame();
     if (DriveBoard->IsAttached())
       RunDriveBoardFrame();
-#ifdef NET_BOARD
+    if (BillBoard->IsAttached())
+      RunBillBoardFrame();
     if (NetBoard->IsRunning())
       RunNetBoardFrame();
-#endif
   }
 
-  timings.frameTicks = CThread::GetTicks() - start;
+  timings.frameTicks = GetTicks() - start;
   // Frame counter
   timings.frameId++;
-  return;
+}
 
-ThreadError:
-  ErrorLog("Threading error in CModel3::RunFrame: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
+static unsigned GetCPUClockFrequencyInHz(const Game &game, Util::Config::Node &config)
+{
+  unsigned mhz = config["PowerPCFrequency"].ValueAsDefault<unsigned>(0);
+  if (!mhz)
+  {
+    if (game.stepping == Game::Stepping::MODEL3_1_0)
+    {
+      mhz = 66;
+    }
+    else if (game.stepping == Game::Stepping::MODEL3_1_5)
+    {
+      mhz = 100;
+    }
+    else  // 2.x
+    {
+      mhz = 166;
+    }
+  }
+  return mhz * 1000000;
 }
 
 void CModel3::RunMainBoardFrame(void)
 {
-	UINT32 start = CThread::GetTicks();
+	UINT32 start = GetTicks();
 
-	// Compute display and VBlank timings
-	unsigned ppcCycles		= m_config["PowerPCFrequency"].ValueAs<unsigned>() * 1000000;
+	/* 
+   * Compute display timings. Refresh rate is 57.524160 Hz and we assume frame timing is the same as System 24:
+   *
+   * - 25 scanlines from /VSYNC high to /BLANK high (top border)
+   * - 384 scanlines from /BLANK high to /BLANK low (active display)
+   * - 11 scanlines from /BLANK low to /VSYNC low (bottom border)
+   * - 4 scanlines from /VSYNC low to /VSYNC high (vertical sync. pulse)
+	 *
+   * 424 lines total: 384 display and 40 blanking/vsync.
+	 */ 
+	unsigned ppcCycles		= GetCPUClockFrequencyInHz(m_game, m_config);
 	unsigned frameCycles	= (unsigned)((float)ppcCycles / 57.524160f);
+
+	// Tile and palette RAM bus timing: nothing is fetched during vertical blanking
+	TileGen.SetCPUClock(ppcCycles);
+	TileGen.BeginBusBlanking();
 	unsigned lineCycles     = frameCycles / 424;
-	unsigned vBlankCycles   = lineCycles * 40;
-	unsigned dispCycles		= lineCycles * 384;
-	unsigned statusCycles   = (unsigned)((float)frameCycles * (0.005f));
-  const bool legacyTiming =
-    m_config["LegacyReal3D"].ValueAsDefault<bool>(false) ||
-    m_config["LegacyReal3DTiming"].ValueAsDefault<bool>(
-      m_config["LegacyStatusBit"].ValueAsDefault<bool>(false));
+    unsigned vBlankCycles   = lineCycles * 40;
+
+	// Games will start writing a new frame after the ping-pong buffers have been flipped, which is indicated by the
+	// ping-pong status bit. The timing of ping-pong flip is determined by the value of tilegen register 0x08, which
+	// is the number of active video lines to display before ping-pong flip occurs. Most games set it to 238 or 239
+	// so that ping-pong flip occurs 66% of the frame time after IRQ2, though a few games set it to a higher value.
 
 	// Scale PPC timer ratio according to speed at which the PowerPC is being emulated so that the observed running frequency of the PPC timer
 	// registers is more or less correct.  This is needed to get the Virtua Striker 2 series of games running at the right speed (they are
@@ -2072,21 +2139,16 @@ void CModel3::RunMainBoardFrame(void)
 	// VBlank
 	if (gpusReady)
 	{
-		TileGen.BeginVBlank();
-		GPU.BeginVBlank((int)statusCycles);
-		if (legacyTiming)
+        TileGen.BeginVBlank();
+		GPU.BeginVBlank();
+        
+		// keep running cycles until IRQ2 is acknowledged
+		// Ski Champ can hang if we check the MIDI control port too early
+		// and miss MIDI interrupts pending before the next IRQ2
+		while (IRQ.ReadIRQEnable() & 0x2 && IRQ.ReadIRQState() & 0x2 && vBlankCycles > 1000)
 		{
-			unsigned gapCycles		= (unsigned)((float)frameCycles * 2.5f / 100.0f);	// gap between IRQ2 & IRQ 0x40
-			unsigned offsetCycles = (unsigned)((float)frameCycles * 33.f / 100.0f);
-			dispCycles = frameCycles - gapCycles - offsetCycles;
-			ppc_execute(offsetCycles);
-			IRQ.Assert(0x02);								// start at 33% of the frame
-			ppc_execute(gapCycles);						// need a gap between asserting irqs
-		}
-		else
-		{
-			dispCycles = lineCycles * 384;
-			ppc_execute(vBlankCycles);
+			ppc_execute(1000);
+            vBlankCycles -= 1000;
 		}
 
 		/*
@@ -2108,13 +2170,25 @@ void CModel3::RunMainBoardFrame(void)
 			if ((IRQ.ReadIRQEnable() & 0x40) == 0)
 				break;
 
+            // PowerPC cycles to allow after a MIDI byte is written before IRQ 0x40 can be asserted again
+            static const UINT64 MIDI_IRQ_MIN_CYCLES = 1000;
+
+			// On the sound board the MIDI interrupt only comes back once the previous byte has been sent, long after
+			// the PowerPC acknowledged it by writing that byte. Games return from the interrupt by polling until IRQ
+			// 0x40 is clear (Scud Race at 1DB0), so asserting it again before the handler has got there leaves the
+			// PowerPC spinning forever. Give it time to finish the handler first.
+			const UINT64 sinceAck = ppc_total_cycles() - midiAckCycle;
+			if (sinceAck < MIDI_IRQ_MIN_CYCLES)
+			{
+				const unsigned wait = (unsigned)(MIDI_IRQ_MIN_CYCLES - sinceAck);
+				ppc_execute(wait);
+				vBlankCycles -= std::min(wait, vBlankCycles);
+			}
+
 			// Process MIDI interrupt
 			IRQ.Assert(0x40);
-			ppc_execute(500); // give PowerPC time to acknowledge IR
-			if (dispCycles >= 500)
-				dispCycles -= 500;
-			else
-				dispCycles = 0;
+			ppc_execute(1000); // give PowerPC time to acknowledge IR
+            vBlankCycles -= 1000;
 
 			++irqCount;
 			if (irqCount > 128)
@@ -2123,6 +2197,8 @@ void CModel3::RunMainBoardFrame(void)
 			}
 		}
 
+        ppc_execute(vBlankCycles);
+
 		IRQ.Assert(0x0D);
 
 		// End VBlank
@@ -2130,56 +2206,40 @@ void CModel3::RunMainBoardFrame(void)
 		TileGen.EndVBlank();
 	}
 
+    auto pingPongFlipLine = TileGen.ReadRegister(0x08);
+
 	// Run the PowerPC for the active display part of the frame
-	if (legacyTiming)
-	{
-		ppc_execute(dispCycles);
-	}
-	else
-	{
-		// TileGen reg 0x08 is a line counter; clamp to the visible 0-383 range.
-		unsigned pingPongFlipLine = TileGen.ReadRegister(0x08) & 0x1FFu;
-		const int overrideLine = m_config["PingPongFlipLine"].ValueAsDefault<int>(-1);
-		if (overrideLine >= 0)
-			pingPongFlipLine = static_cast<unsigned>(overrideLine);
-		if (pingPongFlipLine >= 384u)
-			pingPongFlipLine = 383u;
-		for (unsigned i = 0; i < 384; i++)
-		{
-			if (i == pingPongFlipLine)
-				GPU.FlipPingPongBit();
+    for (unsigned int i = 0; i < 384; i++)
+    {
+        if (i == pingPongFlipLine) {
+            GPU.FlipPingPongBit();
+        }
 
-			if (i == 383)
-				IRQ.Assert(0x02);
+        if (i == 383) {
+            IRQ.Assert(0x02);       // irq2 is asserted at the start of the last line on system24 (as apposed to the end). Lost world won't work without this, the game soft locks. We assume the same here
+        }
 
-			unsigned cycles = lineCycles;
-			if (dispCycles < cycles)
-				cycles = dispCycles;
+        TileGen.DrawLine(i);
+        TileGen.BeginBusLine(ppc_total_cycles());
+        ppc_execute(lineCycles);
+    }
 
-			if (cycles > 0)
-				ppc_execute(cycles);
-
-			if (dispCycles >= cycles)
-				dispCycles -= cycles;
-		}
-	}
-
-	timings.ppcTicks = CThread::GetTicks() - start;
+	timings.ppcTicks = GetTicks() - start;
 }
 
 void CModel3::SyncGPUs(void)
 {
-  UINT32 start = CThread::GetTicks();
+  UINT32 start = GetTicks();
 
   timings.syncSize = GPU.SyncSnapshots() + TileGen.SyncSnapshots();
   gpusReady = true;
 
-  timings.syncTicks = CThread::GetTicks() - start;
+  timings.syncTicks = GetTicks() - start;
 }
 
 void CModel3::RenderFrame(void)
 {
-  UINT32 start = CThread::GetTicks();
+  UINT32 start = GetTicks();
 
   // Call OSD video callbacks
   if (BeginFrameVideo() && gpusReady)
@@ -2193,113 +2253,86 @@ void CModel3::RenderFrame(void)
     TileGen.RenderFrameTop();
     GPU.EndFrame();
     TileGen.EndFrame();
+    m_superAA->Draw();
   }
 
   EndFrameVideo();
 
-  timings.renderTicks = CThread::GetTicks() - start;
+  timings.renderTicks = GetTicks() - start;
 }
 
 bool CModel3::RunSoundBoardFrame(void)
 {
-  UINT32 start = CThread::GetTicks();
+  UINT32 start = GetTicks();
   bool bufferFull = SoundBoard.RunFrame();
-  timings.sndTicks = CThread::GetTicks() - start;
+  timings.sndTicks = GetTicks() - start;
   return bufferFull;
 }
 
 void CModel3::RunDriveBoardFrame(void)
 {
-  UINT32 start = CThread::GetTicks();
+  UINT32 start = GetTicks();
   DriveBoard->RunFrame();
-  timings.drvTicks = CThread::GetTicks() - start;
+  timings.drvTicks = GetTicks() - start;
 }
 
-#ifdef NET_BOARD
+void CModel3::RunBillBoardFrame(void)
+{
+  UINT32 start = GetTicks();
+  BillBoard->RunFrame();
+  timings.billTicks = GetTicks() - start;
+}
+
 void CModel3::RunNetBoardFrame(void)
 {
   NetBoard->RunFrame();
 }
-#endif
 
 bool CModel3::StartThreads(void)
 {
   if (startedThreads)
     return true;
 
-  // Create synchronization objects
-  if (m_gpuMultiThreaded)
-  {
-    ppcBrdThreadSync = CThread::CreateSemaphore(0);
-    if (ppcBrdThreadSync == NULL)
-      goto ThreadError;
-  }
-  sndBrdThreadSync = CThread::CreateSemaphore(0);
-  if (sndBrdThreadSync == NULL)
-    goto ThreadError;
-  sndBrdNotifyLock = CThread::CreateMutex();
-  if (sndBrdNotifyLock == NULL)
-    goto ThreadError;
-  sndBrdNotifySync = CThread::CreateCondVar();
-  if (sndBrdNotifySync == NULL)
-    goto ThreadError;
-  if (DriveBoard->IsAttached())
-  {
-    drvBrdThreadSync = CThread::CreateSemaphore(0);
-    if (drvBrdThreadSync == NULL)
-      goto ThreadError;
-  }
-  notifyLock = CThread::CreateMutex();
-  if (notifyLock == NULL)
-    goto ThreadError;
-  notifySync = CThread::CreateCondVar();
-  if (notifySync == NULL)
-    goto ThreadError;
-
   // Reset thread flags
   pauseThreads = false;
   stopThreads = false;
-  sndBrdWakeNotify = false;
 
-  // Create PPC main board thread, if multi-threading GPU
-  if (m_gpuMultiThreaded)
+  try
   {
-    ppcBrdThread = CThread::CreateThread("MainBoard", StartMainBoardThread, this);
-    if (ppcBrdThread == NULL)
-      goto ThreadError;
+    // Create PPC main board thread, if multi-threading GPU
+    if (m_gpuMultiThreaded)
+      ppcBrdThread = Thread::Start("MainBoard", [this] { RunMainBoardThread(); });
+
+    // Create sound board thread (sync'd or unsync'd)
+    if (syncSndBrdThread)
+      sndBrdThread = Thread::Start("SoundBoardSync", [this] { RunSoundBoardThreadSyncd(); });
+    else
+      sndBrdThread = Thread::Start("SoundBoardNoSync", [this] { RunSoundBoardThread(); });
+
+    // Create drive board thread, if drive board is attached
+    if (DriveBoard->IsAttached())
+      drvBrdThread = Thread::Start("DriveBoard", [this] { RunDriveBoardThread(); });
+
+    // Create billboard thread, if billboard is attached
+    if (BillBoard->IsAttached())
+      bilBrdThread = Thread::Start("BillBoard", [this] { RunBillBoardThread(); });
   }
-
-  // Create sound board thread (sync'd or unsync'd)
-  if (syncSndBrdThread)
-    sndBrdThread = CThread::CreateThread("SoundBoardSync", StartSoundBoardThreadSyncd, this);
-  else
-    sndBrdThread = CThread::CreateThread("SoundBoardNoSync", StartSoundBoardThread, this);
-  if (sndBrdThread == NULL)
-    goto ThreadError;
-
-  // Create drive board thread, if drive board is attached
-  if (DriveBoard->IsAttached())
+  catch (const std::system_error &e)
   {
-    drvBrdThread = CThread::CreateThread("DriveBoard", StartDriveBoardThread, this);
-    if (drvBrdThread == NULL)
-      goto ThreadError;
+    ErrorLog("Unable to create threads: %s\nSwitching back to single-threaded mode.\n", e.what());
+    JoinThreads();
+    m_multiThreaded = false;
+    return false;
   }
 
   // Set audio callback if sound board thread is unsync'd
   if (!syncSndBrdThread)
   {
     SetAudioCallback(AudioCallback, this);
-    WakeSoundBoardThread();  // kick once in case the audio callback is delayed
   }
 
   startedThreads = true;
   return true;
-
-ThreadError:
-  ErrorLog("Unable to create threads and/or synchronization objects: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  DeleteThreadObjects();
-  m_multiThreaded = false;
-  return false;
 }
 
 bool CModel3::PauseThreads(void)
@@ -2307,27 +2340,12 @@ bool CModel3::PauseThreads(void)
   if (!startedThreads)
     return true;
 
-  // Enter notify critical section
-  if (!notifyLock->Lock())
-    goto ThreadError;
-
   // Let threads know that they should pause and wait for all of them to do so
+  std::unique_lock<std::mutex> lock(notifyLock);
   pauseThreads = true;
-  while (ppcBrdThreadRunning || sndBrdThreadRunning || drvBrdThreadRunning)
-  {
-    if (!notifySync->Wait(notifyLock))
-      goto ThreadError;
-  }
-
-  // Leave notify critical section
-  if (!notifyLock->Unlock())
-    goto ThreadError;
+  while (ppcBrdThreadRunning || sndBrdThreadRunning || drvBrdThreadRunning || bilBrdThreadRunning)
+    notifySync.wait(lock);
   return true;
-
-ThreadError:
-  ErrorLog("Threading error in CModel3::PauseThreads: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return false;
 }
 
 bool CModel3::ResumeThreads(void)
@@ -2335,157 +2353,77 @@ bool CModel3::ResumeThreads(void)
   if (!startedThreads)
     return true;
 
-  // Enter notify critical section
-  if (!notifyLock->Lock())
-    goto ThreadError;
-
   // Let all threads know that they can continue running
+  std::lock_guard<std::mutex> lock(notifyLock);
   pauseThreads = false;
-
-  // Leave notify critical section
-  if (!notifyLock->Unlock())
-    goto ThreadError;
   return true;
-
-ThreadError:
-  ErrorLog("Threading error in CModel3::ResumeThreads: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return false;
 }
 
-bool CModel3::StopThreads(void)
+void CModel3::StopThreads(void)
 {
   if (!startedThreads)
-    return true;
+    return;
 
   // If sound board thread is unsync'd then remove audio callback
   if (!syncSndBrdThread)
     SetAudioCallback(NULL, NULL);
 
-  // Enter notify critical section
-  if (!notifyLock->Lock())
-    goto ThreadError;
-
   // Let threads know that they should pause and wait for all of them to do so
-  pauseThreads = true;
-  while (ppcBrdThreadRunning || sndBrdThreadRunning || drvBrdThreadRunning)
   {
-    if (!notifySync->Wait(notifyLock))
-      goto ThreadError;
+    std::unique_lock<std::mutex> lock(notifyLock);
+    pauseThreads = true;
+    while (ppcBrdThreadRunning || sndBrdThreadRunning || drvBrdThreadRunning || bilBrdThreadRunning)
+      notifySync.wait(lock);
   }
 
-  // Now let threads know that they should exit
-  stopThreads = true;
-
-  // Leave notify critical section
-  if (!notifyLock->Unlock())
-    goto ThreadError;
-
-  // Resume each thread in turn and wait for them to exit
-  if (ppcBrdThread != NULL)
-  {
-    if (ppcBrdThreadSync->Post())
-      ppcBrdThread->Wait();
-  }
-  if (sndBrdThread != NULL)
-  {
-    if (syncSndBrdThread)
-    {
-      if (sndBrdThreadSync->Post())
-        sndBrdThread->Wait();
-    }
-    else
-    {
-      if (WakeSoundBoardThread())
-        sndBrdThread->Wait();
-    }
-  }
-  if (drvBrdThread != NULL)
-  {
-    if (drvBrdThreadSync->Post())
-      drvBrdThread->Wait();
-  }
-
-  // Delete all thread and synchronization objects
-  DeleteThreadObjects();
+  JoinThreads();
   startedThreads = false;
-  return true;
-
-ThreadError:
-  ErrorLog("Threading error in CModel3::StopThreads: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return false;
 }
 
-void CModel3::DeleteThreadObjects(void)
+void CModel3::JoinThreads(void)
 {
-  // Delete PPC main board, sound board and drive board threads
-  if (ppcBrdThread != NULL)
+  // Let threads know that they should exit
   {
-    delete ppcBrdThread;
-    ppcBrdThread = NULL;
-  }
-  if (sndBrdThread != NULL)
-  {
-    delete sndBrdThread;
-    sndBrdThread = NULL;
-  }
-  if (drvBrdThread != NULL)
-  {
-    delete drvBrdThread;
-    drvBrdThread = NULL;
+    std::lock_guard<std::mutex> lock(notifyLock);
+    stopThreads = true;
   }
 
-
-  // Delete synchronization objects
-  if (ppcBrdThreadSync != NULL)
+  // Resume each thread in turn and wait for them to exit
+  if (ppcBrdThread.joinable())
   {
-    delete ppcBrdThreadSync;
-    ppcBrdThreadSync = NULL;
+    ppcBrdThreadSync.Post();
+    ppcBrdThread.join();
   }
-  if (sndBrdThreadSync != NULL)
+  if (sndBrdThread.joinable())
   {
-    delete sndBrdThreadSync;
-    sndBrdThreadSync = NULL;
+    if (syncSndBrdThread)
+      sndBrdThreadSync.Post();
+    else
+      WakeSoundBoardThread();
+    sndBrdThread.join();
   }
-  if (drvBrdThreadSync != NULL)
+  if (drvBrdThread.joinable())
   {
-    delete drvBrdThreadSync;
-    drvBrdThreadSync = NULL;
+    drvBrdThreadSync.Post();
+    drvBrdThread.join();
   }
-
-
-  if (sndBrdNotifyLock != NULL)
+  if (bilBrdThread.joinable())
   {
-    delete sndBrdNotifyLock;
-    sndBrdNotifyLock = NULL;
-  }
-  if (sndBrdNotifySync != NULL)
-  {
-    delete sndBrdNotifySync;
-    sndBrdNotifySync = NULL;
-  }
-  if (notifyLock != NULL)
-  {
-    delete notifyLock;
-    notifyLock = NULL;
-  }
-  if (notifySync != NULL)
-  {
-    delete notifySync;
-    notifySync = NULL;
+    bilBrdThreadSync.Post();
+    bilBrdThread.join();
   }
 }
 
 void CModel3::DumpTimings(void)
 {
-  printf("PPC:%3ums%c render:%3ums%c sync:%4uK%c%3ums%c snd:%3ums%c drv:%3ums%c frame:%3ums%c\n",
+  printf("PPC:%3ums%c render:%3ums%c sync:%4uK%c%3ums%c snd:%3ums%c drv:%3ums%c bill:%3ums%c frame:%3ums%c\n",
     timings.ppcTicks, (timings.ppcTicks > timings.renderTicks ? '!' : ','),
     timings.renderTicks, (timings.renderTicks > timings.ppcTicks ? '!' : ','),
     timings.syncSize / 1024, (timings.syncSize / 1024 > 128 ? '!' : ','),
     timings.syncTicks, (timings.syncTicks > 1 ? '!' : ','),
     timings.sndTicks, (timings.sndTicks > 10 ? '!' : ','),
     timings.drvTicks, (timings.drvTicks > 10 ? '!' : ','),
+    timings.billTicks, (timings.billTicks > 10 ? '!' : ','),
     timings.frameTicks, (timings.frameTicks > 16 ? '!' : ' '));
 }
 
@@ -2494,35 +2432,7 @@ FrameTimings CModel3::GetTimings(void)
   return timings;
 }
 
-int CModel3::StartMainBoardThread(void *data)
-{
-  // Call method on CModel3 to run PPC main board thread
-  CModel3 *model3 = (CModel3*)data;
-  return model3->RunMainBoardThread();
-}
-
-int CModel3::StartSoundBoardThread(void *data)
-{
-  // Call method on CModel3 to run sound board thread (unsync'd)
-  CModel3 *model3 = (CModel3*)data;
-  return model3->RunSoundBoardThread();
-}
-
-int CModel3::StartSoundBoardThreadSyncd(void *data)
-{
-  // Call method on CModel3 to run sound board thread (sync'd)
-  CModel3 *model3 = (CModel3*)data;
-  return model3->RunSoundBoardThreadSyncd();
-}
-
-int CModel3::StartDriveBoardThread(void *data)
-{
-  // Call method on CModel3 to run drive board thread
-  CModel3 *model3 = (CModel3*)data;
-  return model3->RunDriveBoardThread();
-}
-
-int CModel3::RunMainBoardThread(void)
+void CModel3::RunMainBoardThread(void)
 {
   for (;;)
   {
@@ -2530,15 +2440,11 @@ int CModel3::RunMainBoardThread(void)
     bool exit = false;
     while (wait && !exit)
     {
-      // Wait on PPC main board thread semaphore
-      if (!ppcBrdThreadSync->Wait())
-        goto ThreadError;
-
-      // Enter notify critical section
-      if (!notifyLock->Lock())
-        goto ThreadError;
+      // Wait on this thread's semaphore
+      ppcBrdThreadSync.Wait();
 
       // Check threads are not being stopped or paused
+      std::lock_guard<std::mutex> lock(notifyLock);
       if (stopThreads)
         exit = true;
       else if (!pauseThreads)
@@ -2546,36 +2452,19 @@ int CModel3::RunMainBoardThread(void)
         wait = false;
         ppcBrdThreadRunning = true;
       }
-
-      // Leave notify critical section
-      if (!notifyLock->Unlock())
-        goto ThreadError;
     }
     if (exit)
-      return 0;
+      return;
 
     // Process a single frame for PPC main board
     RunMainBoardFrame();
 
-    // Enter notify critical section
-    if (!notifyLock->Lock())
-      goto ThreadError;
-
     // Let other threads know processing has finished
+    std::lock_guard<std::mutex> lock(notifyLock);
     ppcBrdThreadRunning = false;
     ppcBrdThreadDone = true;
-    if (!notifySync->SignalAll())
-      goto ThreadError;
-
-    // Leave notify critical section
-    if (!notifyLock->Unlock())
-      goto ThreadError;
+    notifySync.notify_all();
   }
-
-ThreadError:
-  ErrorLog("Threading error in RunMainBoardThread: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return 1;
 }
 
 void CModel3::AudioCallback(void *data)
@@ -2585,45 +2474,28 @@ void CModel3::AudioCallback(void *data)
   model3->WakeSoundBoardThread();
 }
 
-bool CModel3::WakeSoundBoardThread(void)
+void CModel3::WakeSoundBoardThread(void)
 {
-  // Enter sound board notify critical section
-  bool wake;
-  if (!sndBrdNotifyLock->Lock())
-    goto ThreadError;
-
-  // Enter main notify critical section
-  if (!notifyLock->Lock())
-    goto ThreadError;
+  // Holding the sound board notify lock throughout, as the sound board thread does
+  std::lock_guard<std::mutex> sndBrdLock(sndBrdNotifyLock);
 
   // See if sound board thread is currently running
-  wake = !sndBrdThreadRunning;
-
-  // Leave main notify critical section
-  if (!notifyLock->Unlock())
-    goto ThreadError;
+  bool wake;
+  {
+    std::lock_guard<std::mutex> lock(notifyLock);
+    wake = !sndBrdThreadRunning;
+  }
 
   // Only send wake notification to sound board thread if it was not running
   if (wake)
   {
     // Signal to sound board thread that it should start processing again
     sndBrdWakeNotify = true;
-    if (!sndBrdNotifySync->Signal())
-      goto ThreadError;
+    sndBrdNotifySync.notify_one();
   }
-
-  // Leave sound board notify critical section
-  if (!sndBrdNotifyLock->Unlock())
-    goto ThreadError;
-  return wake;
-
-ThreadError:
-  ErrorLog("Threading error in WakeSoundBoardThread: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return false;
 }
 
-int CModel3::RunSoundBoardThread(void)
+void CModel3::RunSoundBoardThread(void)
 {
   for (;;)
   {
@@ -2631,23 +2503,14 @@ int CModel3::RunSoundBoardThread(void)
     bool exit = false;
     while (wait && !exit)
     {
-      // Enter sound board notify critical section
-      if (!sndBrdNotifyLock->Lock())
-        goto ThreadError;
-
       // Wait for notification from audio callback
+      std::unique_lock<std::mutex> sndBrdLock(sndBrdNotifyLock);
       while (!sndBrdWakeNotify)
-      {
-        if (!sndBrdNotifySync->Wait(sndBrdNotifyLock))
-          goto ThreadError;
-      }
+        sndBrdNotifySync.wait(sndBrdLock);
       sndBrdWakeNotify = false;
 
-      // Enter main notify critical section
-      if (!notifyLock->Lock())
-        goto ThreadError;
-
       // Check threads are not being stopped or paused
+      std::lock_guard<std::mutex> lock(notifyLock);
       if (stopThreads)
         exit = true;
       else if (!pauseThreads)
@@ -2655,59 +2518,33 @@ int CModel3::RunSoundBoardThread(void)
         wait = false;
         sndBrdThreadRunning = true;
       }
-
-      // Leave main notify critical section
-      if (!notifyLock->Unlock())
-        goto ThreadError;
-
-      // Leave sound board notify critical section
-      if (!sndBrdNotifyLock->Unlock())
-        goto ThreadError;
     }
     if (exit)
-      return 0;
+      return;
 
     // Keep processing frames until pausing or audio buffer is full
     while (true)
     {
-      // Enter main notify critical section
       bool paused;
-      if (!notifyLock->Lock())
-        goto ThreadError;
-
-      paused = pauseThreads;
-
-      // Leave main notify critical section
-      if (!notifyLock->Unlock())
-        goto ThreadError;
+      {
+        std::lock_guard<std::mutex> lock(notifyLock);
+        paused = pauseThreads;
+      }
 
       if (paused || RunSoundBoardFrame())
         break;
       //printf("Rerunning sound board\n");
     }
 
-    // Enter main notify critical section
-    if (!notifyLock->Lock())
-      goto ThreadError;
-
     // Let other threads know processing has finished
+    std::lock_guard<std::mutex> lock(notifyLock);
     sndBrdThreadRunning = false;
     sndBrdThreadDone = true;
-    if (!notifySync->SignalAll())
-      goto ThreadError;
-
-    // Leave main notify critical section
-    if (!notifyLock->Unlock())
-      goto ThreadError;
+    notifySync.notify_all();
   }
-
-ThreadError:
-  ErrorLog("Threading error in RunSoundBoardThread: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return 1;
 }
 
-int CModel3::RunSoundBoardThreadSyncd(void)
+void CModel3::RunSoundBoardThreadSyncd(void)
 {
   for (;;)
   {
@@ -2715,15 +2552,11 @@ int CModel3::RunSoundBoardThreadSyncd(void)
     bool exit = false;
     while (wait && !exit)
     {
-      // Wait on sound board thread semaphore
-      if (!sndBrdThreadSync->Wait())
-        goto ThreadError;
-
-      // Enter notify critical section
-      if (!notifyLock->Lock())
-        goto ThreadError;
+      // Wait on this thread's semaphore
+      sndBrdThreadSync.Wait();
 
       // Check threads are not being stopped or paused
+      std::lock_guard<std::mutex> lock(notifyLock);
       if (stopThreads)
         exit = true;
       else if (!pauseThreads)
@@ -2731,39 +2564,22 @@ int CModel3::RunSoundBoardThreadSyncd(void)
         wait = false;
         sndBrdThreadRunning = true;
       }
-
-      // Leave notify critical section
-      if (!notifyLock->Unlock())
-        goto ThreadError;
     }
     if (exit)
-      return 0;
+      return;
 
     // Process a single frame for sound board
     RunSoundBoardFrame();
 
-    // Enter notify critical section
-    if (!notifyLock->Lock())
-      goto ThreadError;
-
     // Let other threads know processing has finished
+    std::lock_guard<std::mutex> lock(notifyLock);
     sndBrdThreadRunning = false;
     sndBrdThreadDone = true;
-    if (!notifySync->SignalAll())
-      goto ThreadError;
-
-    // Leave notify critical section
-    if (!notifyLock->Unlock())
-      goto ThreadError;
+    notifySync.notify_all();
   }
-
-ThreadError:
-  ErrorLog("Threading error in RunSoundBoardThreadSyncd: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return 1;
 }
 
-int CModel3::RunDriveBoardThread(void)
+void CModel3::RunDriveBoardThread(void)
 {
   for (;;)
   {
@@ -2771,15 +2587,11 @@ int CModel3::RunDriveBoardThread(void)
     bool exit = false;
     while (wait && !exit)
     {
-      // Wait on drive board thread semaphore
-      if (!drvBrdThreadSync->Wait())
-        goto ThreadError;
-
-      // Enter notify critical section
-      if (!notifyLock->Lock())
-        goto ThreadError;
+      // Wait on this thread's semaphore
+      drvBrdThreadSync.Wait();
 
       // Check threads are not being stopped or paused
+      std::lock_guard<std::mutex> lock(notifyLock);
       if (stopThreads)
         exit = true;
       else if (!pauseThreads)
@@ -2787,36 +2599,54 @@ int CModel3::RunDriveBoardThread(void)
         wait = false;
         drvBrdThreadRunning = true;
       }
-
-      // Leave notify critical section
-      if (!notifyLock->Unlock())
-        goto ThreadError;
     }
     if (exit)
-      return 0;
+      return;
 
     // Process a single frame for drive board
     RunDriveBoardFrame();
 
-    // Enter notify critical section
-    if (!notifyLock->Lock())
-      goto ThreadError;
-
     // Let other threads know processing has finished
+    std::lock_guard<std::mutex> lock(notifyLock);
     drvBrdThreadRunning = false;
     drvBrdThreadDone = true;
-    if (!notifySync->SignalAll())
-      goto ThreadError;
-
-    // Leave notify critical section
-    if (!notifyLock->Unlock())
-      goto ThreadError;
+    notifySync.notify_all();
   }
+}
 
-ThreadError:
-  ErrorLog("Threading error in RunDriveBoardThread: %s\nSwitching back to single-threaded mode.\n", CThread::GetLastError());
-  m_multiThreaded = false;
-  return 1;
+void CModel3::RunBillBoardThread(void)
+{
+  for (;;)
+  {
+    bool wait = true;
+    bool exit = false;
+    while (wait && !exit)
+    {
+      // Wait on this thread's semaphore
+      bilBrdThreadSync.Wait();
+
+      // Check threads are not being stopped or paused
+      std::lock_guard<std::mutex> lock(notifyLock);
+      if (stopThreads)
+        exit = true;
+      else if (!pauseThreads)
+      {
+        wait = false;
+        bilBrdThreadRunning = true;
+      }
+    }
+    if (exit)
+      return;
+
+    // Process a single frame for billboard
+    RunBillBoardFrame();
+
+    // Let other threads know processing has finished
+    std::lock_guard<std::mutex> lock(notifyLock);
+    bilBrdThreadRunning = false;
+    bilBrdThreadDone = true;
+    notifySync.notify_all();
+  }
 }
 
 void CModel3::Reset(void)
@@ -2839,6 +2669,7 @@ void CModel3::Reset(void)
 
   // MIDI
   midiCtrlPort = 0;
+  midiAckCycle = 0;
 
   // Reset all devices
   ppc_reset();
@@ -2855,6 +2686,8 @@ void CModel3::Reset(void)
 
   if (DriveBoard->IsAttached())
     DriveBoard->Reset();
+  if (BillBoard->IsAttached())
+    BillBoard->Reset();
 
   m_cryptoDevice.Reset();
 
@@ -2866,10 +2699,9 @@ void CModel3::Reset(void)
   timings.renderTicks = 0;
   timings.sndTicks = 0;
   timings.drvTicks = 0;
-#ifdef NET_BOARD
+  timings.billTicks = 0;
   timings.netTicks = 0;
   NetBoard->Reset();
-#endif
   timings.frameTicks = 0;
   timings.frameId = 0;
   
@@ -2886,268 +2718,29 @@ const Game &CModel3::GetGame() const
   return m_game;
 }
 
-// Stepping-dependent parameters (MPC10x type, etc.) are initialized here
-Result CModel3::LoadGame(const Game &game, const ROMSet &rom_set)
+void CModel3::AttachRenderers(IRender2D *Render2DPtr, IRender3D *Render3DPtr, SuperAA *superAA)
 {
-  m_game = Game();
-
-  /*
-   * Copy in ROM data with mirroring as necessary for the following cases:
-   *
-   *  - VROM: 64MB. If <= 32MB, mirror to high 32MB.
-   *  - Banked CROM: 128MB. If <= 64MB, mirror to high 64MB.
-   *  - Fixed CROM: 8MB. If < 8MB, loaded only in high part of space and low
-   *    part is a mirror of (banked) CROM0.
-   *  - Sample ROM: 16MB. If <= 8MB, mirror to high 8MB.
-   */
-  if (rom_set.get_rom("vrom").size <= 32*0x100000)
-  {
-    rom_set.get_rom("vrom").CopyTo(&vrom[0], 32*0x100000);
-    rom_set.get_rom("vrom").CopyTo(&vrom[32*0x100000], 32*0x100000);
-  }
-  else
-    rom_set.get_rom("vrom").CopyTo(vrom, 64*0x100000);
-  if (rom_set.get_rom("banked_crom").size <= 64*0x100000)
-  {
-    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 0], 64*0x100000);
-    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 64*0x100000], 64*0x100000);
-  }
-  else
-    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 0], 128*0x100000);
-  size_t crom_size = rom_set.get_rom("crom").size;
-  if (crom_size > 8*0x100000)
-    return ErrorLog("Fixed CROM is too large (%zu bytes; max is 0x800000).", crom_size);
-  rom_set.get_rom("crom").CopyTo(&crom[8*0x100000 - crom_size], crom_size);
-  if (crom_size < 8*0x100000)
-    rom_set.get_rom("banked_crom").CopyTo(&crom[0], 8*0x100000 - crom_size);
-  if (rom_set.get_rom("sound_samples").size <= 8*0x100000)
-  {
-    rom_set.get_rom("sound_samples").CopyTo(&sampleROM[0], 8*0x100000);
-    rom_set.get_rom("sound_samples").CopyTo(&sampleROM[8*0x100000], 8*0x100000);
-  }
-  else
-    rom_set.get_rom("sound_samples").CopyTo(sampleROM, 16*0x100000);
-  rom_set.get_rom("sound_program").CopyTo(soundROM, 512*1024);
-  rom_set.get_rom("mpeg_program").CopyTo(dsbROM, 128*1024);
-  rom_set.get_rom("mpeg_music").CopyTo(mpegROM, 16*0x100000);
-  rom_set.get_rom("driveboard_program").CopyTo(driveROM, 64*1024);
-
-  // Convert PowerPC and 68K ROMs to little endian words
-  Util::FlipEndian32(crom, 8*0x100000 + 128*0x100000);
-  Util::FlipEndian16(soundROM, 512*1024);
-  Util::FlipEndian16(sampleROM, 16*0x100000);
-
-  // Configure CPU and PCI bridge
-  PPC_CONFIG  ppc_config;
-  if (game.stepping == "2.0" || game.stepping == "2.1")
-  {
-    ppc_config.pvr = PPC_MODEL_603R;  // 166 MHz
-    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
-    ppc_config.bus_frequency_multiplier = 0x25; // 2.5X multiplier
-    PCIBridge.SetModel(0x106);        // MPC106
-  }
-  else if (game.stepping == "1.5")
-  {
-    ppc_config.pvr = PPC_MODEL_603E;  // 100 MHz
-    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
-    ppc_config.bus_frequency_multiplier = 0x15; // 1.5X multiplier
-    PCIBridge.SetModel(0x105);        // MPC105
-  }
-  else if (game.stepping == "1.0")
-  {
-    ppc_config.pvr = PPC_MODEL_603R;  // 66 MHz
-    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
-    ppc_config.bus_frequency_multiplier = 0x10; // 1X multiplier
-    PCIBridge.SetModel(0x105);        // MPC105
-  }
-  else
-  {
-    ErrorLog("Cannot configure Model 3 because game uses unrecognized stepping (%s).", game.stepping.c_str());
-    return Result::FAIL;
-  }
-
-  if (!game.pci_bridge.empty())
-  {
-    if (game.pci_bridge == "MPC105")
-      PCIBridge.SetModel(0x105);
-    else if (game.pci_bridge == "MPC106")
-      PCIBridge.SetModel(0x106);
-    else
-      ErrorLog("Unknown PCI bridge specified in ROM set definition file (%s). Defaulting to MPC%X.", game.pci_bridge.c_str(), PCIBridge.GetModel());
-  }
-
-  // Initialize CPU
-  ppc_init(&ppc_config);
-  ppc_attach_bus(this);
-  // Upstream 036af1c: skip PowerPC idle loops polling main RAM (IdleSkip = 0 in Supermodel.ini disables)
-  ppc_set_idle_skip(m_config["IdleSkip"].ValueAsDefault<bool>(true) ? 0x800000 : 0);
-  PPCFetchRegions[0].start = 0;
-  PPCFetchRegions[0].end = 0x007FFFFF;
-  PPCFetchRegions[0].ptr = (UINT32 *) ram;
-  PPCFetchRegions[1].start = 0xFF800000;
-  PPCFetchRegions[1].end = 0xFFFFFFFF;
-  PPCFetchRegions[1].ptr = (UINT32 *) crom;
-  PPCFetchRegions[2].start = 0;
-  PPCFetchRegions[2].end = 0;
-  PPCFetchRegions[2].ptr = NULL;
-  ppc_set_fetch(PPCFetchRegions);
-
-  // Initialize Real3D
-  m_stepping = ((game.stepping[0] - '0') << 4) | (game.stepping[2] - '0');
-  uint32_t real3DPCIID = game.real3d_pci_id;
-  if (0 == real3DPCIID)
-  {
-    real3DPCIID = m_stepping >= 0x20 ? CReal3D::PCIID::Step2x : CReal3D::PCIID::Step1x;
-  }
-  GPU.SetStepping(m_stepping, real3DPCIID);
-
-  // MPEG board (if present)
-  if (rom_set.get_rom("mpeg_program").size)
-  {
-    if (game.mpeg_board == "DSB1")
-    {
-      DSB = new(std::nothrow) CDSB1(m_config);
-      if (NULL == DSB)
-        return ErrorLog("Insufficient memory for Digital Sound Board object.");
-    }
-    else if (game.mpeg_board == "DSB2")
-    {
-      Util::FlipEndian16(dsbROM, 128*1024); // 68K program needs to be byte swapped
-      DSB = new(std::nothrow) CDSB2(m_config);
-      if (NULL == DSB)
-        return ErrorLog("Insufficient memory for Digital Sound Board object.");
-    }
-    else if (game.mpeg_board.empty())
-      ErrorLog("No MPEG board type defined in game XML for MPEG ROMs.");
-    else
-      ErrorLog("Unknown MPEG board type '%s'. Only 'DSB1' and 'DSB2' are supported.", game.mpeg_board.c_str());
-    if (DSB && Result::OKAY != DSB->Init(dsbROM, mpegROM))
-      return Result::FAIL;
-  }
-  SoundBoard.AttachDSB(DSB);
-
-  // Drive board (if present)
-  if (game.driveboard_type == Game::DRIVE_BOARD_WHEEL && rom_set.get_rom("driveboard_program").size)
-  {
-    DriveBoard = new CWheelBoard(m_config);
-    if (DriveBoard->Init(driveROM) != Result::OKAY)
-      return Result::FAIL;
-  }
-  else if (game.driveboard_type == Game::DRIVE_BOARD_JOYSTICK && rom_set.get_rom("driveboard_program").size)
-  {
-    DriveBoard = new CJoyBoard(m_config);
-    if (DriveBoard->Init(driveROM) != Result::OKAY)
-      return Result::FAIL;
-  }
-  else if (game.driveboard_type == Game::DRIVE_BOARD_BILLBOARD && rom_set.get_rom("driveboard_program").size)
-  {
-    DriveBoard = new CBillBoard(m_config);
-    if (DriveBoard->Init(driveROM) != Result::OKAY)
-      return Result::FAIL;
-  }
-  else if (game.driveboard_type == Game::DRIVE_BOARD_SKI)
-  {
-    DriveBoard = new CSkiBoard(m_config);
-    if (DriveBoard->Init(driveROM) != Result::OKAY) // no actual ROM data loaded (ski feedback is simulated)
-      return Result::FAIL;
-  }
-  else
-  {
-    // Dummy drive board (presents itself as not attached)
-    DriveBoard = new CDriveBoard(m_config);
-    if (DriveBoard->Init() != Result::OKAY)
-      return Result::FAIL;
-  }
-
-  // Security board encryption device
-  m_cryptoDevice.Init(game.encryption_key, std::bind(&CModel3::ReadSecurityRAM, this, std::placeholders::_1));
-
-  // Print game information
-  std::set<std::string> extra_hw;
-  std::string engine_type = (m_config["New3DEngine"].ValueAs<bool>() ? "New" : "Legacy");
-
-  if (DSB)
-    extra_hw.insert(Util::Format() << "Digital Sound Board (Type " << game.mpeg_board << ")");
-  if (DriveBoard->IsAttached())
-  {
-    if (DriveBoard->GetType() == Game::DRIVE_BOARD_BILLBOARD)
-      extra_hw.insert("Billboard");
-    else
-      extra_hw.insert("Drive Board");
-  }
-  if (game.encryption_key)
-    extra_hw.insert("Security Board");
-  if (game.netboard_present)
-    extra_hw.insert("Net Board");
-  if (!game.version.empty())
-    std::cout << "    Title:          " << game.title << " (" << game.version << ")" << std::endl;
-  else
-    std::cout << "    Title:          " << game.title << std::endl;
-  std::cout << "    ROM Set:        " << game.name << std::endl;
-  std::cout << "    Developer:      " << game.manufacturer << std::endl;
-  std::cout << "    Year:           " << game.year << std::endl;
-  std::cout << "    Stepping:       " << game.stepping << std::endl;
-  std::cout << "    3D Engine:      " << engine_type << std::endl;
-  if (!extra_hw.empty())
-    std::cout << "    Extra Hardware: " << Util::Format(", ").Join(extra_hw) << std::endl;
-  std::cout << std::endl;
-
-  m_game = game;
-#ifdef NET_BOARD
-  NetBoard->GetGame(m_game);
-  if (Result::OKAY != NetBoard->Init(netRAM, netBuffer))
-  {
-    return Result::FAIL;
-  }
-
-  m_runNetBoard = m_game.stepping != "1.0" && NetBoard->IsAttached();
-#endif
-  return Result::OKAY;
-}
-
-void CModel3::AttachRenderers(CRender2D *Render2DPtr, IRender3D *Render3DPtr)
-{
-  TileGen.AttachRenderer(Render2DPtr);
+  TileGen.AttachRenderer(dynamic_cast<CRender2D *>(Render2DPtr));
+  Render3DPtr->SetStepping(m_stepping);
   GPU.AttachRenderer(Render3DPtr);
+  m_superAA = superAA;
 }
 
-void CModel3::AttachInputs(CInputs *InputsPtr)
-{
-  Inputs = InputsPtr;
+constexpr static int RAM_SIZE			= 0x800000;		//8MB
+constexpr static int CROM_SIZE			= 0x800000;		//8MB
+constexpr static int CROMxx_SIZE		= 0x8000000;	//128MB
+constexpr static int VROM_SIZE			= 0x4000000;	//64MB
+constexpr static int BACKUPRAM_SIZE		= 0x20000;		//128KB
+constexpr static int SECURITYRAM_SIZE	= 0x20000;		//128KB
+constexpr static int SOUNDROM_SIZE		= 0x80000;		//512KB
+constexpr static int SAMPLEROM_SIZE		= 0x1000000;	//16MB
+constexpr static int DSBPROGROM_SIZE	= 0x20000;		//128KB
+constexpr static int DSBMPEGROM_SIZE	= 0x1000000;	//16MB
+constexpr static int DRIVEROM_SIZE		= 0x10000;		//64KB
+constexpr static int NETBUFFER_SIZE		= 0x20000;		//128KB
+constexpr static int NETRAM_SIZE		= 0x10000;		//64KB
 
-  if (DriveBoard->IsAttached())
-    DriveBoard->AttachInputs(Inputs, m_game.inputs);
-
-  DebugLog("Model 3 attached inputs\n");
-}
-
-void CModel3::AttachOutputs(COutputs *OutputsPtr)
-{
-  Outputs = OutputsPtr;
-  Outputs->SetGame(m_game);
-  Outputs->Attached();
-
-  if (DriveBoard->IsAttached())
-    DriveBoard->AttachOutputs(Outputs);
-
-  DebugLog("Model 3 attached outputs\n");
-}
-
-const static int RAM_SIZE			= 0x800000;		//8MB
-const static int CROM_SIZE			= 0x800000;		//8MB
-const static int CROMxx_SIZE		= 0x8000000;	//128MB
-const static int VROM_SIZE			= 0x4000000;	//64MB
-const static int BACKUPRAM_SIZE		= 0x20000;		//128KB
-const static int SECURITYRAM_SIZE	= 0x20000;		//128KB
-const static int SOUNDROM_SIZE		= 0x80000;		//512KB
-const static int SAMPLEROM_SIZE		= 0x1000000;	//16MB
-const static int DSBPROGROM_SIZE	= 0x20000;		//128KB
-const static int DSBMPEGROM_SIZE	= 0x1000000;	//16MB
-const static int DRIVEROM_SIZE		= 0x10000;		//64KB
-const static int NETBUFFER_SIZE		= 0x20000;		//128KB
-const static int NETRAM_SIZE		= 0x10000;		//64KB
-
-const static int MEM_POOL_SIZE		= RAM_SIZE + CROM_SIZE +
+constexpr static int MEM_POOL_SIZE		= RAM_SIZE + CROM_SIZE +
                                         CROMxx_SIZE + VROM_SIZE +
                                         BACKUPRAM_SIZE + SECURITYRAM_SIZE +
                                         SOUNDROM_SIZE + SAMPLEROM_SIZE +
@@ -3155,24 +2748,25 @@ const static int MEM_POOL_SIZE		= RAM_SIZE + CROM_SIZE +
                                         DRIVEROM_SIZE + NETBUFFER_SIZE +
                                         NETRAM_SIZE;
 
-const static int RAM_OFFSET			= 0;
-const static int CROM_OFFSET		= RAM_OFFSET + RAM_SIZE;
-const static int CROMxx_OFFSET		= CROM_OFFSET + CROM_SIZE;
-const static int VROM_OFFSET		= CROMxx_OFFSET + CROMxx_SIZE;
-const static int BACKUPRAM_OFFSET	= VROM_OFFSET + VROM_SIZE;
-const static int SECURITYRAM_OFFSET	= BACKUPRAM_OFFSET + BACKUPRAM_SIZE;
-const static int SOUNDROM_OFFSET	= SECURITYRAM_OFFSET + SECURITYRAM_SIZE;
-const static int SAMPLEROM_OFFSET	= SOUNDROM_OFFSET + SOUNDROM_SIZE;
-const static int DSBPROGROM_OFFSET	= SAMPLEROM_OFFSET + SAMPLEROM_SIZE;
-const static int DSBMPEGROM_OFFSET	= DSBPROGROM_OFFSET + DSBPROGROM_SIZE;
-const static int DRIVEROM_OFFSET	= DSBMPEGROM_OFFSET + DSBMPEGROM_SIZE;
-const static int NETBUFFER_OFFSET	= DRIVEROM_OFFSET + DRIVEROM_SIZE;
-const static int NETRAM_OFFSET		= NETBUFFER_OFFSET + NETBUFFER_SIZE;
+constexpr static int RAM_OFFSET			= 0;
+constexpr static int CROM_OFFSET		= RAM_OFFSET + RAM_SIZE;
+constexpr static int CROMxx_OFFSET		= CROM_OFFSET + CROM_SIZE;
+constexpr static int VROM_OFFSET		= CROMxx_OFFSET + CROMxx_SIZE;
+constexpr static int BACKUPRAM_OFFSET	= VROM_OFFSET + VROM_SIZE;
+constexpr static int SECURITYRAM_OFFSET	= BACKUPRAM_OFFSET + BACKUPRAM_SIZE;
+constexpr static int SOUNDROM_OFFSET	= SECURITYRAM_OFFSET + SECURITYRAM_SIZE;
+constexpr static int SAMPLEROM_OFFSET	= SOUNDROM_OFFSET + SOUNDROM_SIZE;
+constexpr static int DSBPROGROM_OFFSET	= SAMPLEROM_OFFSET + SAMPLEROM_SIZE;
+constexpr static int DSBMPEGROM_OFFSET	= DSBPROGROM_OFFSET + DSBPROGROM_SIZE;
+constexpr static int DRIVEROM_OFFSET	= DSBMPEGROM_OFFSET + DSBMPEGROM_SIZE;
+constexpr static int NETBUFFER_OFFSET	= DRIVEROM_OFFSET + DRIVEROM_SIZE;
+constexpr static int NETRAM_OFFSET		= NETBUFFER_OFFSET + NETBUFFER_SIZE;
 
-// Model 3 initialization. Some initialization is deferred until ROMs are loaded in LoadROMSet()
-Result CModel3::Init(void)
+// Model 3 initialization: memory, devices, ROMs, and the stepping-dependent
+// parameters (MPC10x type, etc.)
+Result CModel3::Init(const Game &game, const ROMSet &rom_set)
 {
-  float memSizeMB = (float)MEM_POOL_SIZE / (float)0x100000;
+  constexpr float memSizeMB = (float)MEM_POOL_SIZE / (float)0x100000;
 
   // Allocate all memory for ROMs and PPC RAM
   memoryPool = new(std::nothrow) UINT8[MEM_POOL_SIZE];
@@ -3196,16 +2790,17 @@ Result CModel3::Init(void)
 
   SetCROMBank(0xFF);
 
-  // Initialize other devices (PowerPC, DSB, and security board initialized after ROMs loaded)
+  // Initialize devices (the PowerPC, DSB, drive board, and security board are
+  // initialized after the ROMs are loaded)
   IRQ.Init();
   PCIBridge.Init();
   PCIBus.Init();
-  SCSI.Init(this,&IRQ,0x100); // SCSI is actually a non-maskable interrupt, so we give it a bit number outside of 8-bit range
+  SCSI.Init(this,&IRQ,CIRQ::NMI); // SCSI is actually a non-maskable interrupt
   RTC.Init();
   EEPROM.Init();
   if (Result::OKAY != TileGen.Init(&IRQ))
     return Result::FAIL;
-  if (Result::OKAY != GPU.Init(vrom,this,&IRQ,0x100)) // same for Real3D DMA interrupt
+  if (Result::OKAY != GPU.Init(vrom,this,&IRQ,CIRQ::NMI,Real3DConfig::Model3(game.stepping))) // same for Real3D DMA interrupt
     return Result::FAIL;
   if (Result::OKAY != SoundBoard.Init(soundROM,sampleROM))
     return Result::FAIL;
@@ -3215,14 +2810,216 @@ Result CModel3::Init(void)
   PCIBus.AttachDevice(14,&SCSI);
   PCIBus.AttachDevice(16,this);
 
-#ifdef NET_BOARD
   if (m_config["SimulateNet"].ValueAs<bool>())
-      NetBoard = new CSimNetBoard(m_config);
+      NetBoard = new CSimNetBoard(m_config, m_server);
   else
-      NetBoard = new CNetBoard(m_config);
-#endif // NET_BOARD
+      NetBoard = new CNetBoard(m_config, m_server);
 
   DebugLog("Initialized Model 3 (allocated %1.1f MB)\n", memSizeMB);
+
+  /*
+   * Copy in ROM data with mirroring as necessary for the following cases:
+   *
+   *  - VROM: 64MB. If <= 32MB, mirror to high 32MB.
+   *  - Banked CROM: 128MB. If <= 64MB, mirror to high 64MB.
+   *  - Fixed CROM: 8MB. If < 8MB, loaded only in high part of space and low
+   *    part is a mirror of (banked) CROM0.
+   *  - Sample ROM: 16MB. If <= 8MB, mirror to high 8MB.
+   */
+  if (rom_set.get_rom("vrom").size <= 32*0x100000)
+  {
+    rom_set.get_rom("vrom").CopyTo(&vrom[0], 32*100000);
+    rom_set.get_rom("vrom").CopyTo(&vrom[32*0x100000], 32*0x100000);
+  }
+  else
+    rom_set.get_rom("vrom").CopyTo(vrom, 64*0x100000);
+  if (rom_set.get_rom("banked_crom").size <= 64*0x100000)
+  {
+    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 0], 64*0x100000);
+    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 64*0x100000], 64*0x100000);
+  }
+  else
+    rom_set.get_rom("banked_crom").CopyTo(&crom[8*0x100000 + 0], 128*0x100000);
+  size_t crom_size = rom_set.get_rom("crom").size;
+  rom_set.get_rom("crom").CopyTo(&crom[8*0x100000 - crom_size], crom_size);
+  if (crom_size < 8*0x100000)
+    rom_set.get_rom("banked_crom").CopyTo(&crom[0], 8*0x100000 - crom_size);
+  if (rom_set.get_rom("sound_samples").size <= 8*0x100000)
+  {
+    rom_set.get_rom("sound_samples").CopyTo(&sampleROM[0], 8*0x100000);
+    rom_set.get_rom("sound_samples").CopyTo(&sampleROM[8*0x100000], 8*0x100000);
+  }
+  else
+    rom_set.get_rom("sound_samples").CopyTo(sampleROM, 16*0x100000);
+  rom_set.get_rom("sound_program").CopyTo(soundROM, 512*1024);
+  rom_set.get_rom("mpeg_program").CopyTo(dsbROM, 128*1024);
+  rom_set.get_rom("mpeg_music").CopyTo(mpegROM, 16*0x100000);
+  rom_set.get_rom("driveboard_program").CopyTo(driveROM, 64*1024);
+
+  // Convert PowerPC and 68K ROMs to little endian words
+  Util::FlipEndian32(crom, 8*0x100000 + 128*0x100000);
+  Util::FlipEndian16(soundROM, 512*1024);
+  Util::FlipEndian16(sampleROM, 16*0x100000);
+
+  // Configure CPU and PCI bridge
+  PPC_CONFIG  ppc_config;
+  if (game.stepping == Game::Stepping::MODEL3_2_0 || game.stepping == Game::Stepping::MODEL3_2_1)
+  {
+    ppc_config.pvr = PPC_MODEL_603R;  // 166 MHz
+    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
+    ppc_config.bus_frequency_multiplier = 0x25; // 2.5X multiplier
+    PCIBridge.SetModel(0x106);        // MPC106
+  }
+  else if (game.stepping == Game::Stepping::MODEL3_1_5)
+  {
+    ppc_config.pvr = PPC_MODEL_603E;  // 100 MHz
+    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
+    ppc_config.bus_frequency_multiplier = 0x15; // 1.5X multiplier
+    PCIBridge.SetModel(0x105);        // MPC105
+  }
+  else if (game.stepping == Game::Stepping::MODEL3_1_0)
+  {
+    ppc_config.pvr = PPC_MODEL_603R;  // 66 MHz
+    ppc_config.bus_frequency = BUS_FREQUENCY_66MHZ;
+    ppc_config.bus_frequency_multiplier = 0x10; // 1X multiplier
+    PCIBridge.SetModel(0x105);        // MPC105
+  }
+  else
+  {
+    ErrorLog("Cannot configure Model 3 because game uses unrecognized stepping (%s).", Game::SteppingName(game.stepping));
+    return Result::FAIL;
+  }
+
+  // Initialize CPU
+  ppc_init(&ppc_config);
+  ppc_attach_bus(this);
+  ppc_set_idle_skip(m_config["IdleSkip"].ValueAs<bool>() ? 0x800000 : 0);  // main RAM: nothing else writes it while the PowerPC runs
+  PPCFetchRegions[0].start = 0;
+  PPCFetchRegions[0].end = 0x007FFFFF;
+  PPCFetchRegions[0].ptr = (UINT32 *) ram;
+  PPCFetchRegions[1].start = 0xFF800000;
+  PPCFetchRegions[1].end = 0xFFFFFFFF;
+  PPCFetchRegions[1].ptr = (UINT32 *) crom;
+  PPCFetchRegions[2].start = 0;
+  PPCFetchRegions[2].end = 0;
+  PPCFetchRegions[2].ptr = NULL;
+  ppc_set_fetch(PPCFetchRegions);
+
+  // JTAG scan chain of the stepping
+  m_stepping = game.stepping;
+  m_jtag.SetStepping(m_stepping);
+
+  // MPEG board (if present)
+  if (rom_set.get_rom("mpeg_program").size)
+  {
+    if (game.mpeg_board == Game::MPEG_BOARD_DSB1)
+    {
+      DSB = new(std::nothrow) CDSB1(m_config);
+      if (NULL == DSB)
+        return ErrorLog("Insufficient memory for Digital Sound Board object.");
+    }
+    else if (game.mpeg_board == Game::MPEG_BOARD_DSB2)
+    {
+      DSB = new(std::nothrow) CDSB2(m_config);
+      if (NULL == DSB)
+        return ErrorLog("Insufficient memory for Digital Sound Board object.");
+    }
+    else
+      ErrorLog("No MPEG board type defined in game XML for MPEG ROMs.");
+    if (DSB && Result::OKAY != DSB->Init(dsbROM, mpegROM))
+      return Result::FAIL;
+  }
+  SoundBoard.AttachDSB(DSB);
+
+  // Drive board (if present)
+  if (game.driveboard_type == Game::DRIVE_BOARD_WHEEL && rom_set.get_rom("driveboard_program").size)
+  {
+    DriveBoard = new CWheelBoard(m_config);
+    if (DriveBoard->Init(driveROM) != Result::OKAY)
+      return Result::FAIL;
+  }
+  else if (game.driveboard_type == Game::DRIVE_BOARD_JOYSTICK && rom_set.get_rom("driveboard_program").size)
+  {
+    DriveBoard = new CJoyBoard(m_config);
+    if (DriveBoard->Init(driveROM) != Result::OKAY)
+      return Result::FAIL;
+  }
+  else if (game.driveboard_type == Game::DRIVE_BOARD_SKI)
+  {
+    DriveBoard = new CSkiBoard(m_config);
+    if (DriveBoard->Init(driveROM) != Result::OKAY) // no actual ROM data loaded (ski feedback is simulated)
+      return Result::FAIL;
+  }
+  else
+  {
+    // Dummy drive board (presents itself as not attached)
+    DriveBoard = new CDriveBoard(m_config);
+    if (DriveBoard->Init() != Result::OKAY)
+      return Result::FAIL;
+  }
+
+  // Billboard (if present). Its program ROM is loaded into the drive board ROM region. All it does is drive
+  // the outputs, so it is only emulated when there are outputs to send them to.
+  BillBoard = new CBillBoard();
+  bool hasBillBoard = game.driveboard_type == Game::DRIVE_BOARD_BILLBOARD && rom_set.get_rom("driveboard_program").size;
+  if (BillBoard->Init(hasBillBoard && Outputs ? driveROM : nullptr) != Result::OKAY)
+    return Result::FAIL;
+
+  // Security board encryption device
+  m_cryptoDevice.Init(game.encryption_key, std::bind(&CModel3::ReadSecurityRAM, this, std::placeholders::_1));
+
+  // Print game information
+  std::set<std::string> extra_hw;
+
+  if (DSB)
+    extra_hw.insert(Util::Format() << "Digital Sound Board (Type " << (game.mpeg_board == Game::MPEG_BOARD_DSB1 ? 1 : 2) << ")");
+  if (DriveBoard->IsAttached())
+    extra_hw.insert("Drive Board");
+  if (BillBoard->IsAttached())
+    extra_hw.insert("Billboard");
+  else if (hasBillBoard)
+    extra_hw.insert("Billboard (not emulated, outputs are off)");
+  if (game.encryption_key)
+    extra_hw.insert("Security Board");
+  if (game.netboard_present)
+    extra_hw.insert("Net Board");
+  if (!game.version.empty())
+    std::cout << "    Title:          " << game.title << " (" << game.version << ")" << std::endl;
+  else
+    std::cout << "    Title:          " << game.title << std::endl;
+  std::cout << "    ROM Set:        " << game.name << std::endl;
+  std::cout << "    Developer:      " << game.manufacturer << std::endl;
+  std::cout << "    Year:           " << game.year << std::endl;
+  std::cout << "    Hardware:       " << Game::SteppingName(game.stepping) << std::endl;
+  if (extra_hw.empty())
+    extra_hw.insert("None");
+  std::cout << "    Extra Hardware: " << Util::Format(", ").Join(extra_hw) << std::endl;
+  std::cout << std::endl;
+
+  m_game = game;
+
+  // Inputs and outputs need the game
+  if (Outputs)
+  {
+    Outputs->SetGame(m_game);
+    Outputs->Attached();
+  }
+  if (DriveBoard->IsAttached())
+  {
+    DriveBoard->AttachInputs(Inputs, m_game.inputs);
+    if (Outputs)
+      DriveBoard->AttachOutputs(Outputs);
+  }
+  if (BillBoard->IsAttached() && Outputs)
+    BillBoard->AttachOutputs(Outputs);
+
+  NetBoard->GetGame(m_game);
+  if (Result::OKAY != NetBoard->Init(netRAM, netBuffer))
+  {
+    return Result::FAIL;
+  }
+
+  m_runNetBoard = m_game.stepping != Game::Stepping::MODEL3_1_0 && NetBoard->IsAttached();
 
   return Result::OKAY;
 }
@@ -3237,36 +3034,34 @@ CDriveBoard *CModel3::GetDriveBoard(void)
   return DriveBoard;
 }
 
-#ifdef NET_BOARD
+CBillBoard *CModel3::GetBillBoard(void)
+{
+  return BillBoard;
+}
+
 INetBoard *CModel3::GetNetBoard(void)
 {
   return NetBoard;
 }
-#endif
 
-CModel3::CModel3(Util::Config::Node &config)
+CModel3::CModel3(Util::Config::Node &config, CInputs *inputs, COutputs *outputs, std::shared_ptr<CNetServer> server)
   : m_config(config),
-  m_multiThreaded(
-    [&config]() {
-      try { return config["MultiThreaded"].ValueAs<bool>(); }
-      catch (...) { return false; }
-    }()),
-  m_gpuMultiThreaded(
-    [&config]() {
-      try { return config["GPUMultiThreaded"].ValueAs<bool>(); }
-      catch (...) { return false; }
-    }()),
+    m_multiThreaded(config["MultiThreaded"].ValueAs<bool>()),
+    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>()),
+    Inputs(inputs),
+    Outputs(outputs),
+    sndBrdWakeNotify(false),
     TileGen(config),
     GPU(config),
     SoundBoard(config),
-    m_jtag(GPU)
+    m_jtag(GPU),
+    m_superAA(nullptr),
+    m_server(std::move(server))
 {
   // Initialize pointers so dtor can know whether to free them
   memoryPool = NULL;
 
   // Various uninitialized pointers
-  Inputs = NULL;
-  Outputs = NULL;
   ram = NULL;
   crom = NULL;
   vrom = NULL;
@@ -3282,15 +3077,16 @@ CModel3::CModel3(Util::Config::Node &config)
 
   DSB = NULL;
   DriveBoard = NULL;
+  BillBoard = NULL;
+
+  NetBoard = NULL;
+  m_runNetBoard = false;
 
   securityPtr = 0;
 
   startedThreads = false;
   pauseThreads = false;
   stopThreads = false;
-  ppcBrdThread = NULL;
-  sndBrdThread = NULL;
-  drvBrdThread = NULL;
 
   ppcBrdThreadRunning = false;
   ppcBrdThreadDone = false;
@@ -3298,21 +3094,33 @@ CModel3::CModel3(Util::Config::Node &config)
   sndBrdThreadDone = false;
   drvBrdThreadRunning = false;
   drvBrdThreadDone = false;
+  bilBrdThreadRunning = false;
+  bilBrdThreadDone = false;
+  sndBrdWakeNotify = false;
 
   syncSndBrdThread = false;
-  ppcBrdThreadSync = NULL;
-  sndBrdThreadSync = NULL;
-  drvBrdThreadSync = NULL;
 
-  notifyLock = NULL;
-  notifySync = NULL;
+  m_stepping = Game::Stepping::UNKNOWN;
+  inputBank = 0;
+  serialFIFO1 = 0;
+  serialFIFO2 = 0;
+  gunReg = 0;
+  adcChannel = 0;
+
+  midiCtrlPort = 0;
+  midiAckCycle = 0;
+  driveROM = nullptr;
+  OutputRegister[0] = OutputRegister[1] = 0;
+  cromBankReg = 0;
+  memset(PPCFetchRegions, 0, sizeof(PPCFetchRegions));
+  gpusReady = false;
+  memset(&timings, 0, sizeof(FrameTimings));
 
   DebugLog("Built Model 3\n");
 }
 
 // Dumps a memory region to a file for debugging purposes
-#if 0
-static void Dump(const char *file, uint8_t *buf, size_t size, bool reverse32, bool reverse16)
+static void Dump(const char *name, const char *file, uint8_t *buf, size_t size, bool reverse32, bool reverse16)
 {
   FILE *fp = fopen(file, "wb");
   if (NULL != fp)
@@ -3323,22 +3131,24 @@ static void Dump(const char *file, uint8_t *buf, size_t size, bool reverse32, bo
       Util::FlipEndian16(buf, size);
     fwrite(buf, sizeof(UINT8), size, fp);
     fclose(fp);
-    printf("dumped %s\n", file);
+    printf("Wrote %s to '%s'\n", name, file);
   }
   else
-    printf("unable to dump %s\n", file);
+    ErrorLog("Unable to open '%s' for writing.", file);
 }
-#endif
 
 CModel3::~CModel3(void)
 {
-  // Debug: dump some files
-  //Dump("ram", ram, 0x800000, true, false);
-  //Dump("vrom", vrom, 0x4000000, true, false);
-  //Dump("crom", crom, 0x800000, true, false);
-  //Dump("bankedCrom", &crom[0x800000], 0x7000000, true, false);
-  //Dump("soundROM", soundROM, 0x80000, false, true);
-  //Dump("sampleROM", sampleROM, 0x800000, false, true);
+  // Dump memory if requested
+  if (m_config["DumpMemory"].ValueAsDefault<bool>(false))
+  {
+    Dump("RAM", "ram.bin", ram, 0x800000, true, false);
+    Dump("VROM", "vrom.bin", vrom, 0x4000000, true, false);
+    Dump("CROM", "crom.bin", crom, 0x800000, true, false);
+    Dump("banked CROM", "banked_crom.bin", &crom[0x800000], 0x7000000, true, false);
+    Dump("sound ROM", "sound_rom.bin", soundROM, 0x80000, false, true);
+    Dump("sample ROM", "sample_rom.bin", sampleROM, 0x800000, false, true);
+  }
 
   // Stop all threads
   StopThreads();
@@ -3360,6 +3170,18 @@ CModel3::~CModel3(void)
   {
       delete DriveBoard;
       DriveBoard = NULL;
+  }
+
+  if (BillBoard != NULL)
+  {
+      delete BillBoard;
+      BillBoard = NULL;
+  }
+
+  if (NetBoard != NULL)
+  {
+      delete NetBoard;
+      NetBoard = NULL;
   }
 
   Inputs = NULL;

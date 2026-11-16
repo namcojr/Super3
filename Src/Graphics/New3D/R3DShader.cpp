@@ -1,8 +1,27 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #include "R3DShader.h"
-#ifndef __ANDROID__
 #include "R3DShaderQuads.h"
-#endif
 #include "R3DShaderTriangles.h"
+#include "R3DShaderCommon.h"
 
 // having 2 sets of shaders to maintain is really less than ideal
 // but hopefully not too many breaking changes at this point
@@ -29,16 +48,30 @@ void R3DShader::Start()
 	m_lightEnabled		= false;
 	m_specularEnabled	= false;
 	m_layered			= false;
+	m_noLosReturn		= false;
 	m_textureInverted	= false;
 	m_fixedShading		= false;
+	m_smoothShading		= false;
 	m_translatorMap		= false;
 	m_modelScale		= 1.0f;
+	m_nodeAlpha			= 1.0f;
 	m_shininess			= 0;
 	m_specularValue		= 0;
-	m_microTexScale		= 0;
+	m_microTexMinLOD	= 0;
+	m_fogIntensity		= 0.0f;
+	m_microTexID		= -1;
+	m_texturePage		= -1;
 
-	m_baseTexSize[0]	= 0;
-	m_baseTexSize[1]	= 0;
+	m_baseTexInfo[0]	= -1;
+	m_baseTexInfo[1]	= -1;
+	m_baseTexInfo[2]	= -1;
+	m_baseTexInfo[3]	= -1;
+
+	m_baseTexType		= -1;
+
+	m_transX			= -1;
+	m_transY			= -1;
+	m_transPage			= -1;
 
 	m_texWrapMode[0]	= 0;
 	m_texWrapMode[1]	= 0;
@@ -50,49 +83,36 @@ void R3DShader::Start()
 bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 {
 	bool quads = m_config["QuadRendering"].ValueAs<bool>();
-#ifdef __ANDROID__
-	// GLES 3.0: no geometry shaders / adjacency in the baseline path.
-	quads = false;
-#endif
 
 	const char* vShader = vertexShaderR3D;
 	const char* gShader = "";
 	const char* fShader = fragmentShaderR3D;
 
-#ifdef __ANDROID__
-	if (m_config["AndroidSimpleShader"].ValueAsDefault<bool>(false)) {
-		vShader = vertexShaderR3DSimple;
-		fShader = fragmentShaderR3DSimple;
-	}
-#endif
-
-#ifndef __ANDROID__
 	if (quads) {
 		vShader = vertexShaderR3DQuads;
 		gShader = geometryShaderR3DQuads;
 		fShader = fragmentShaderR3DQuads;
 	}
-#endif
 
 	m_shaderProgram		= glCreateProgram();
 	m_vertexShader		= glCreateShader(GL_VERTEX_SHADER);
 	m_fragmentShader	= glCreateShader(GL_FRAGMENT_SHADER);
 
-	glShaderSource(m_vertexShader,		1, (const GLchar **)&vShader, NULL);
-	glShaderSource(m_fragmentShader,	1, (const GLchar **)&fShader, NULL);
+	const char* shaderArray[] = { fShader, fragmentShaderR3DCommon };
+
+	glShaderSource(m_vertexShader, 1, (const GLchar **)&vShader, nullptr);
+	glShaderSource(m_fragmentShader, (GLsizei)std::size(shaderArray), shaderArray, nullptr);
 
 	glCompileShader(m_vertexShader);
 	glCompileShader(m_fragmentShader);
 
-#ifndef __ANDROID__
 	if (quads) {
 		m_geoShader = glCreateShader(GL_GEOMETRY_SHADER);
-		glShaderSource(m_geoShader, 1, (const GLchar **)&gShader, NULL);
+		glShaderSource(m_geoShader, 1, (const GLchar **)&gShader, nullptr);
 		glCompileShader(m_geoShader);
 		glAttachShader(m_shaderProgram, m_geoShader);
 		PrintShaderResult(m_geoShader);
 	}
-#endif
 
 	PrintShaderResult(m_vertexShader);
 	PrintShaderResult(m_fragmentShader);
@@ -103,16 +123,21 @@ bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 
 	PrintProgramResult(m_shaderProgram);
 
-	m_locTexture1			= glGetUniformLocation(m_shaderProgram, "tex1");
-	m_locTexture2			= glGetUniformLocation(m_shaderProgram, "tex2");
+	m_locTextureBank[0]		= glGetUniformLocation(m_shaderProgram, "textureBank[0]");
+	m_locTextureBank[1]		= glGetUniformLocation(m_shaderProgram, "textureBank[1]");
+	m_locTexturePage		= glGetUniformLocation(m_shaderProgram, "texturePage");
 	m_locTexture1Enabled	= glGetUniformLocation(m_shaderProgram, "textureEnabled");
 	m_locTexture2Enabled	= glGetUniformLocation(m_shaderProgram, "microTexture");
 	m_locTextureAlpha		= glGetUniformLocation(m_shaderProgram, "textureAlpha");
 	m_locAlphaTest			= glGetUniformLocation(m_shaderProgram, "alphaTest");
-	m_locMicroTexScale		= glGetUniformLocation(m_shaderProgram, "microTextureScale");
-	m_locBaseTexSize		= glGetUniformLocation(m_shaderProgram, "baseTexSize");
+	m_locMicroTexMinLOD		= glGetUniformLocation(m_shaderProgram, "microTextureMinLOD");
+	m_locMicroTexID			= glGetUniformLocation(m_shaderProgram, "microTextureID");
+	m_locBaseTexInfo		= glGetUniformLocation(m_shaderProgram, "baseTexInfo");
+	m_locBaseTexType		= glGetUniformLocation(m_shaderProgram, "baseTexType");
 	m_locTextureInverted	= glGetUniformLocation(m_shaderProgram, "textureInverted");
 	m_locTexWrapMode		= glGetUniformLocation(m_shaderProgram, "textureWrapMode");
+	m_locColourLayer		= glGetUniformLocation(m_shaderProgram, "colourLayer");
+	m_locLayerDepthBias		= glGetUniformLocation(m_shaderProgram, "layerDepthBias");
 
 	m_locFogIntensity		= glGetUniformLocation(m_shaderProgram, "fogIntensity");
 	m_locFogDensity			= glGetUniformLocation(m_shaderProgram, "fogDensity");
@@ -129,6 +154,7 @@ bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 	m_locSpecularValue		= glGetUniformLocation(m_shaderProgram, "specularValue");
 	m_locSpecularEnabled	= glGetUniformLocation(m_shaderProgram, "specularEnabled");
 	m_locFixedShading		= glGetUniformLocation(m_shaderProgram, "fixedShading");
+	m_locSmoothShading		= glGetUniformLocation(m_shaderProgram, "smoothShading");
 	m_locTranslatorMap		= glGetUniformLocation(m_shaderProgram, "translatorMap");
 
 	m_locSpotEllipse		= glGetUniformLocation(m_shaderProgram, "spotEllipse");
@@ -136,14 +162,43 @@ bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 	m_locSpotColor			= glGetUniformLocation(m_shaderProgram, "spotColor");
 	m_locSpotFogColor		= glGetUniformLocation(m_shaderProgram, "spotFogColor");
 	m_locModelScale			= glGetUniformLocation(m_shaderProgram, "modelScale");
+	m_locNodeAlpha			= glGetUniformLocation(m_shaderProgram, "nodeAlpha");
 
 	m_locProjMat			= glGetUniformLocation(m_shaderProgram, "projMat");
 	m_locModelMat			= glGetUniformLocation(m_shaderProgram, "modelMat");
 
-	m_locHardwareStep		= glGetUniformLocation(m_shaderProgram, "hardwareStep");
+	m_locStep15Luminous		= glGetUniformLocation(m_shaderProgram, "step15Luminous");
 	m_locDiscardAlpha		= glGetUniformLocation(m_shaderProgram, "discardAlpha");
 
+	m_locCota				= glGetUniformLocation(m_shaderProgram, "cota");
+
 	return true;
+}
+
+void R3DShader::UnloadShader()
+{
+	// make sure no shader is bound
+	glUseProgram(0);
+
+	if (m_vertexShader) {
+		glDeleteShader(m_vertexShader);
+		m_vertexShader = 0;
+	}
+
+	if (m_geoShader) {
+		glDeleteShader(m_geoShader);
+		m_geoShader = 0;
+	}
+
+	if (m_fragmentShader) {
+		glDeleteShader(m_fragmentShader);
+		m_fragmentShader = 0;
+	}
+
+	if (m_shaderProgram) {
+		glDeleteProgram(m_shaderProgram);
+		m_shaderProgram = 0;
+	}
 }
 
 GLint R3DShader::GetVertexAttribPos(const std::string& attrib)
@@ -151,7 +206,6 @@ GLint R3DShader::GetVertexAttribPos(const std::string& attrib)
 	if (m_vertexLocCache.count(attrib)==0) {
 		auto pos = glGetAttribLocation(m_shaderProgram, attrib.c_str());
 		m_vertexLocCache[attrib] = pos;
-		return pos;
 	}
 
 	return m_vertexLocCache[attrib];
@@ -176,8 +230,8 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 	}
 
 	if (m_dirtyMesh) {
-		glUniform1i(m_locTexture1, 0);
-		glUniform1i(m_locTexture2, 1);
+		glUniform1i(m_locTextureBank[0], 0);
+		glUniform1i(m_locTextureBank[1], 1);
 	}
 
 	if (m_dirtyMesh || m->textured != m_textured1) {
@@ -190,15 +244,34 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 		m_textured2 = m->microTexture;
 	}
 
-	if (m_dirtyMesh || m->microTextureScale != m_microTexScale) {
-		glUniform1f(m_locMicroTexScale, m->microTextureScale);
-		m_microTexScale = m->microTextureScale;
+	if (m_dirtyMesh || (m->page ^ m_transPage) != m_texturePage) {
+		glUniform1i(m_locTexturePage, m->page ^ m_transPage);
+		m_texturePage = (m->page ^ m_transPage);
 	}
 
-	if (m_dirtyMesh || (m_baseTexSize[0] != m->width || m_baseTexSize[1] != m->height)) {
-		m_baseTexSize[0] = (float)m->width;
-		m_baseTexSize[1] = (float)m->height;
-		glUniform2fv(m_locBaseTexSize, 1, m_baseTexSize);
+	if (m_dirtyMesh || m->microTextureMinLOD != m_microTexMinLOD) {
+		glUniform1f(m_locMicroTexMinLOD, m->microTextureMinLOD);
+		m_microTexMinLOD = m->microTextureMinLOD;
+	}
+
+	if (m_dirtyMesh || m->microTextureID != m_microTexID) {
+		glUniform1i(m_locMicroTexID, m->microTextureID);
+		m_microTexID = m->microTextureID;
+	}
+
+	if (m_dirtyMesh || (m_baseTexInfo[0] != m->x || m_baseTexInfo[1] != m->y) || m_baseTexInfo[2] != m->width || m_baseTexInfo[3] != m->height) {
+
+		m_baseTexInfo[0] = m->x;
+		m_baseTexInfo[1] = m->y;
+		m_baseTexInfo[2] = m->width;
+		m_baseTexInfo[3] = m->height;
+
+		glUniform4i(m_locBaseTexInfo, (m->x + m_transX), (m->y + m_transY), m->width, m->height);
+	}
+
+	if (m_dirtyMesh || m_baseTexType != m->format) {
+		m_baseTexType = m->format;
+		glUniform1i(m_locBaseTexType,  m_baseTexType);
 	}
 
 	if (m_dirtyMesh || m->inverted != m_textureInverted) {
@@ -246,6 +319,11 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 		m_fixedShading = m->fixedShading;
 	}
 
+	if (m_dirtyMesh || m->smoothShading != m_smoothShading) {
+		glUniform1i(m_locSmoothShading, m->smoothShading);
+		m_smoothShading = m->smoothShading;
+	}
+
 	if (m_dirtyMesh || m->translatorMap != m_translatorMap) {
 		glUniform1i(m_locTranslatorMap, m->translatorMap);
 		m_translatorMap = m->translatorMap;
@@ -257,14 +335,37 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 		glUniform2iv(m_locTexWrapMode, 1, m_texWrapMode);
 	}
 
+	if (m_dirtyMesh || m->noLosReturn != m_noLosReturn) {
+		m_noLosReturn = m->noLosReturn;
+		glStencilFunc(GL_ALWAYS, m_noLosReturn << 7, 0b10000000);
+		glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+		glStencilMask(0b10000000);
+	}
+
 	if (m_dirtyMesh || m->layered != m_layered) {
 		m_layered = m->layered;
+		// i think it should just disable z write, but the polys I think must be written first
 		if (m_layered) {
-			glEnable(GL_STENCIL_TEST);
+			glStencilFunc(GL_EQUAL, 0, 0b01111111);			// basically stencil test passes if the value is zero
+			glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);			// if the stencil test passes, we increment the value
+			glStencilMask(0b01111111);
+
+			// only a decal that is actually written marks the pixel. Incrementing on depth fail let hidden
+			// decals (e.g. on a tile behind a rise) block visible ones drawn later (Digital Bayou road).
+
 		}
 		else {
-			glDisable(GL_STENCIL_TEST);
+			glStencilFunc(GL_ALWAYS, m_noLosReturn << 7, 0b10000000);
+			glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+			glStencilMask(0b10000000);
 		}
+
+		// PRO-1000 layered polygons are decals that must win against coplanar non-layered polygons regardless
+		// of draw order. Depth is reverse z (larger = closer), so scale it up slightly for layered polys.
+		// Decal vertices are 17.7 fixed point, so they can sit ~1/128 unit off their base plane; at grazing
+		// angles that is ~0.1% of depth, often on the losing side. 1/512 (~0.2%) covers it with margin.
+		const float layerDepthBias = 1.0f + 1.0f / 512.0f;
+		glUniform1f(m_locLayerDepthBias, m_layered ? layerDepthBias : 1.0f);
 	}
 
 	m_dirtyMesh = false;
@@ -273,11 +374,11 @@ void R3DShader::SetMeshUniforms(const Mesh* m)
 void R3DShader::SetViewportUniforms(const Viewport *vp)
 {
 	//didn't bother caching these, they don't get frequently called anyway
-	glUniform1f(m_locFogDensity, vp->fogParams[3]);
-	glUniform1f(m_locFogStart, vp->fogParams[4]);
-	glUniform3fv(m_locFogColour, 1, vp->fogParams);
-	glUniform1f(m_locFogAttenuation, vp->fogParams[5]);
-	glUniform1f(m_locFogAmbient, vp->fogParams[6]);
+	glUniform1f(m_locFogDensity, vp->fogDensity);
+	glUniform1f(m_locFogStart, vp->fogStart);
+	glUniform3fv(m_locFogColour, 1, vp->fogColour);
+	glUniform1f(m_locFogAttenuation, vp->fogAttenuation);
+	glUniform1f(m_locFogAmbient, vp->fogAmbient);
 
 	glUniform3fv(m_locLighting, 2, vp->lightingParams);
 	glUniform1i(m_locSunClamp, vp->sunClamp);
@@ -289,7 +390,9 @@ void R3DShader::SetViewportUniforms(const Viewport *vp)
 
 	glUniformMatrix4fv(m_locProjMat, 1, GL_FALSE, vp->projectionMatrix);
 
-	glUniform1i(m_locHardwareStep, vp->hardwareStep);
+	glUniform1i(m_locStep15Luminous, vp->step15Luminous);
+
+	glUniform1f(m_locCota, vp->cota);
 }
 
 void R3DShader::SetModelStates(const Model* model)
@@ -299,6 +402,18 @@ void R3DShader::SetModelStates(const Model* model)
 		m_modelScale = model->scale;
 	}
 
+	if (m_dirtyModel || model->alpha != m_nodeAlpha) {
+		glUniform1f(m_locNodeAlpha, model->alpha);
+		m_nodeAlpha = model->alpha;
+	}
+
+	m_transX = model->textureOffsetX;
+	m_transY = model->textureOffsetY;
+	m_transPage = model->page;
+
+	// reset texture values
+	for (auto& i : m_baseTexInfo) { i = -1; }
+
 	glUniformMatrix4fv(m_locModelMat, 1, GL_FALSE, model->modelMat);
 
 	m_dirtyModel = false;
@@ -307,6 +422,11 @@ void R3DShader::SetModelStates(const Model* model)
 void R3DShader::DiscardAlpha(bool discard)
 {
 	glUniform1i(m_locDiscardAlpha, discard);
+}
+
+void R3DShader::SetLayer(Layer layer)
+{
+	glUniform1i(m_locColourLayer, (GLint)layer);
 }
 
 void R3DShader::PrintShaderResult(GLuint shader)
@@ -349,4 +469,5 @@ void R3DShader::PrintProgramResult(GLuint program)
 		printf("%s\n", infoLog.data());
 	}
 }
+
 } // New3D

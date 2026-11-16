@@ -63,7 +63,7 @@ unsigned CBlockFile::ReadBytes(void *data, uint32_t numBytes)
 {
   if (NULL == fp)
     return 0;
-  return fread(data, sizeof(uint8_t), numBytes, fp);
+  return (uint32_t)fread(data, sizeof(uint8_t), numBytes, fp);
 }
 
 unsigned CBlockFile::ReadDWord(uint32_t *data)
@@ -124,8 +124,8 @@ void CBlockFile::WriteBlockHeader(const std::string &name, const std::string &co
   WriteDWord(0);  // will be automatically updated as we write the file
   
   // Write name and comment lengths
-  WriteDWord(name.size() + 1);
-  WriteDWord(comment.size() + 1);
+  WriteDWord((uint32_t)name.size() + 1);
+  WriteDWord((uint32_t)comment.size() + 1);
   Write(name);
   Write(comment);
   
@@ -157,12 +157,12 @@ unsigned CBlockFile::Read(void *data, uint32_t numBytes)
   return 0;
 }
 
-unsigned CBlockFile::Read(bool *value)
+unsigned CBlockFile::Read(bool& value)
 {
   uint8_t byte;
   unsigned numBytes = Read(&byte, sizeof(byte));
-  if (numBytes >  0)
-    *value = byte != 0;
+  if (numBytes > 0)
+    value = byte != 0;
   return numBytes;
 }
 
@@ -181,7 +181,7 @@ void CBlockFile::Write(bool value)
 void CBlockFile::Write(const std::string &str)
 {
   if (mode == 'w')
-    WriteBytes(str.c_str(), str.length() + 1);
+      WriteBytes(str.c_str(), (uint32_t)str.length() + 1);
 }
 
 void CBlockFile::NewBlock(const std::string &name, const std::string &comment)
@@ -259,22 +259,25 @@ Result CBlockFile::Load(const std::string &file)
   
 void CBlockFile::Close(void)
 {
-  if (fp != NULL)
+  if (fp != nullptr)
     fclose(fp);
-  fp = NULL;
+  fp = nullptr;
   mode = 0;
 }
 
-CBlockFile::CBlockFile(void)
+CBlockFile::CBlockFile(void) :
+    fp(nullptr),
+    mode(0),
+    fileSize(0),
+    blockStartPos(0),
+    dataStartPos(0)
 {
-  fp = NULL;
-  mode = 0;   // neither reading nor writing (do nothing)
 }
 
 CBlockFile::~CBlockFile(void)
 {
-  if (fp != NULL) // in case user forgot
+  if (fp != nullptr) // in case user forgot
     fclose(fp);
-  fp = NULL;
+  fp = nullptr;
   mode = 0;
 }

@@ -1,4 +1,24 @@
-﻿#ifndef _POLY_HEADER_H_
+﻿/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
+#ifndef _POLY_HEADER_H_
 #define _POLY_HEADER_H_
 
 #include "Types.h"
@@ -31,7 +51,7 @@ xxxxxxxx xxxxxxxx xxxxxxxx--------		Polygon normal X coordinate(2.22 fixed point
 -------- -------- -------- ----x---		1 = smooth shading, 0 = flat shading
 -------- -------- -------- -----x--		If set, this is the last polygon
 -------- -------- -------- ------x-		Poly color, 1 = RGB, 0 = color table
--------- -------- -------- -------x		No los return ?
+-------- -------- -------- -------x		No los return (line of sight)
 
 0x02: 
 xxxxxxxx xxxxxxxx xxxxxxxx --------		Polygon normal Y coordinate(2.22 fixed point)
@@ -50,12 +70,12 @@ xxxxxxxx xxxxxxxx xxxxxxxx --------		Polygon normal Z coordinate(2.22 fixed poin
 
 0x04: 
 xxxxxxxx xxxxxxxx xxxxxxxx --------		Color (RGB888 or two 12-bit indexes, sensor color and color)
--------- -------- -------- x-------		Translator map enable ? (Seems to be some 4/5bit colour format. Max observed value=16)
+-------- -------- -------- x-------		Translator map enable (multiplies colour values by 16)
 -------- -------- -------- -x------		Texture page
 -------- -------- -------- ---xxxxx		Upper 5 bits of texture U coordinate
 
 0x05 : 
-xxxxxxxx xxxxxxxx xxxxxxxx --------		Texture NP ?
+xxxxxxxx xxxxxxxx xxxxxxxx --------		Texture NP
 -------- -------- -------- x-------		Low bit of texture U coordinate
 -------- -------- -------- ---xxxxx		Low 5 bits of texture V coordinate
 
@@ -78,9 +98,11 @@ class PolyHeader
 {
 public:
 	PolyHeader();
-	PolyHeader(UINT32* h);
+	PolyHeader(UINT32* h, const UINT32* end = nullptr);
 
 	void operator =(const UINT32* h);
+	void SetEnd(const UINT32* e) { end = e; }
+	bool InBounds();				// current polygon (header + vertex data) lies inside memory
 
 	UINT32*	StartOfData();
 	bool	NextPoly();
@@ -108,13 +130,14 @@ public:
 	bool	FixedShading();
 	bool	SmoothShading();
 	bool	NoLosReturn();			// no line of sight return	(still not exactly how sure this attribute is used yet)
+	bool	EdgeOnTranslucency();
 
 	//header 2
 	bool	TexUMirror();
 	bool	TexVMirror();
 	bool	MicroTexture();
 	int		MicroTextureID();
-	int		MicroTextureMinLOD();	// basically how many times it repeats compared to the base texture (i assume)
+	int		MicroTextureMinLOD();
 
 	// header 3
 	int		TexWidth();
@@ -132,6 +155,7 @@ public:
 	// header 5
 	int		X();
 	int		Y();
+	float	TextureNP();
 
 	//header 6
 	bool	Layered();
@@ -155,6 +179,7 @@ public:
 
 	//=============
 	UINT32* header;
+	const UINT32* end = nullptr;	// one past the last word of the memory the model is in (nullptr = unchecked)
 	//=============
 };
 

@@ -38,20 +38,20 @@ public:
   bool InitializeSystem() override;
   int GetKeyIndex(const char* keyName) override;
   const char* GetKeyName(int keyIndex) override;
-  bool IsKeyPressed(int /*kbdNum*/, int keyIndex) override;
+  bool IsKeyPressed(int /*kbdNum*/, int keyIndex) const override;
 
-  int GetMouseAxisValue(int mseNum, int axisNum) override;
-  int GetMouseWheelDir(int mseNum) override;
-  bool IsMouseButPressed(int mseNum, int butNum) override;
+  int GetMouseAxisValue(int mseNum, int axisNum) const override;
+  int GetMouseWheelDir(int mseNum) const override;
+  bool IsMouseButPressed(int mseNum, int butNum) const override;
 
-  int GetJoyAxisValue(int joyNum, int axisNum) override;
-  bool IsJoyPOVInDir(int joyNum, int povNum, int povDir) override;
-  bool IsJoyButPressed(int joyNum, int butNum) override;
+  int GetJoyAxisValue(int joyNum, int axisNum) const override;
+  bool IsJoyPOVInDir(int joyNum, int povNum, int povDir) const override;
+  bool IsJoyButPressed(int joyNum, int butNum) const override;
   bool ProcessForceFeedbackCmd(int /*joyNum*/, int /*axisNum*/, ForceFeedbackCmd /*ffCmd*/) override { return false; }
 
-  int GetNumKeyboards() override { return 1; }
-  int GetNumMice() override;
-  int GetNumJoysticks() override;
+  int GetNumKeyboards() const override { return 1; }
+  int GetNumMice() const override;
+  int GetNumJoysticks() const override;
 
   const KeyDetails* GetKeyDetails(int /*kbdNum*/) override { return nullptr; }
   const MouseDetails* GetMouseDetails(int mseNum) override;
@@ -220,7 +220,7 @@ private:
   //   synthesize trigger timing. We also temporarily suppress the trigger so reload
   //   happens in the correct order even if the user is holding the screen to aim/fire.
   bool m_gunAutoTrigger = false;
-  uint32_t m_suppressGunTriggerUntilMs = 0;
+  mutable uint32_t m_suppressGunTriggerUntilMs = 0;
   uint32_t m_pendingReloadTriggerAtMs = 0;
 
   std::vector<ControllerState> m_controllers;

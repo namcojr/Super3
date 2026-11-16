@@ -32,6 +32,7 @@
 #ifndef INCLUDED_DSB_H
 #define INCLUDED_DSB_H
 
+#include <atomic>
 #include "Types.h"
 #include "CPU/Bus.h"
 #include "CPU/68K/68K.h"
@@ -41,7 +42,12 @@
 #define FIFO_STACK_SIZE			0x100
 #define FIFO_STACK_SIZE_MASK	(FIFO_STACK_SIZE - 1)
 
-#define NUM_SAMPLES_PER_FRAME   (44100/60)
+// A frame is 1/refresh rate of a second of 44.1 KHz audio: 735 samples at 60 Hz, 766-767 at 57.524 Hz. The
+// sound board supports refresh rates down to 45 Hz.
+#define MAX_SAMPLES_PER_FRAME   (44100/45 + 1)
+
+// MPEG samples (32 KHz) needed to make numSamples output samples, plus 2 for the resampler (see DSB.cpp)
+#define MPEG_SAMPLES_FOR(numSamples)  (((numSamples) * 32000 + 44099) / 44100 + 2)
 
 /******************************************************************************
  Resampling
@@ -71,12 +77,13 @@
 class CDSBResampler
 {
 public:
-	int		UpSampleAndMix(INT16 *outL, INT16 *outR, INT16 *inL, INT16 *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate);
+	int		UpSampleAndMix(float *outL, float *outR, INT16 *inL, INT16 *inR, UINT8 volumeL, UINT8 volumeR, int sizeOut, int sizeIn, int outRate, int inRate);
 	void	Reset(void);
 	CDSBResampler(const Util::Config::Node &config)
 	  : m_config(config)
-  {
-  }
+	{
+		Reset();
+	}
 private:
 	const Util::Config::Node &m_config;
 	int	nFrac;
@@ -105,16 +112,19 @@ public:
 	virtual void SendCommand(UINT8 data) = 0;
 
 	/*
-	 * RunFrame(audioL, audioR):
+	 * RunFrame(audioL, audioR, numSamples):
 	 *
 	 * Runs one frame and updates the MPEG audio. Audio is mixed into the
 	 * supplied buffers (they are assumed to already contain audio data).
 	 *
 	 * Parameters:
-	 *		audioL	Left audio channel, one frame (44 KHz, 1/60th second).
-	 *		audioR	Right audio channel.
+	 *		audioL		Left audio channel, one frame (44.1 KHz).
+	 *		audioR		Right audio channel.
+	 *		numSamples	Length of the frame in samples (at most
+	 *					MAX_SAMPLES_PER_FRAME). The board runs for the same
+	 *					amount of time.
 	 */
-	virtual void RunFrame(INT16 *audioL, INT16 *audioR) = 0;
+	virtual void RunFrame(float *audioL, float *audioR, int numSamples) = 0;
 
 	/*
 	 * Reset(void):
@@ -187,7 +197,7 @@ public:
 
 	// DSB interface (see CDSB definition)
 	void 	SendCommand(UINT8 data);
-	void 	RunFrame(INT16 *audioL, INT16 *audioR);
+	void 	RunFrame(float *audioL, float *audioR, int numSamples);
 	void 	Reset(void);
 	void	SaveState(CBlockFile *StateFile);
 	void	LoadState(CBlockFile *StateFile);
@@ -219,7 +229,7 @@ private:
 	// Command FIFO
 	UINT8	fifo[FIFO_STACK_SIZE];
 	int		fifoIdxR;		// read position
-	int		fifoIdxW;		// write position
+	std::atomic<int>	fifoIdxW;	// write position, shared with the sound thread
 
 	// MPEG playback variables
 	int		mpegStart;
@@ -264,7 +274,7 @@ public:
 
 	// DSB interface (see definition of CDSB)
 	void 	SendCommand(UINT8 data);
-	void 	RunFrame(INT16 *audioL, INT16 *audioR);
+	void 	RunFrame(float *audioL, float *audioR, int numSamples);
 	void 	Reset(void);
 	void	SaveState(CBlockFile *StateFile);
 	void	LoadState(CBlockFile *StateFile);
@@ -299,7 +309,7 @@ private:
 	};
 
 	// DSB memory
-	const UINT8	*progROM;		// 68K program ROM (passed in from parent object)
+	const UINT8	*progROM;		// 68K program ROM, big endian (passed in from parent object)
 	const UINT8	*mpegROM;		// MPEG music ROM
 	UINT8		*memoryPool;	// all memory allocated here
 	UINT8		*ram;			// 68K RAM
@@ -307,7 +317,7 @@ private:
 	// Command FIFO
 	UINT8	fifo[FIFO_STACK_SIZE];
 	int		fifoIdxR;		// read position
-	int		fifoIdxW;		// write position
+	std::atomic<int>	fifoIdxW;	// write position, shared with the sound thread
 
 	// Registers
 	int 	cmdLatch;
@@ -324,8 +334,7 @@ private:
 
 	// M68K CPU
 	M68KCtx	M68K;
-	static const int k_framePeriod = 11000000/60;
-	static const int k_timerPeriod = 11000000/1000; // 1KHz timer
+	static constexpr int k_timerPeriod = 11000000/1000; // 1KHz timer
 	int m_cyclesElapsedThisFrame;
 	int m_nextTimerInterruptCycles;
 };

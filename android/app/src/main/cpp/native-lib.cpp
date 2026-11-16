@@ -28,10 +28,16 @@
 #include "Version.h"
 #include "BlockFile.h"
 
+#include "Graphics/SuperAA.h"
+#include "Network/NetServer.h"
+
 #include "android_input_system.h"
+#include "android_osd.h"
 #include "gles_presenter.h"
-#include "gles_stub_render3d.h"
-#include "Graphics/New3D/New3D.h"
+#include "New3D/New3D.h"
+
+// Upstream DefaultConfig() (generated/UpstreamDefaultConfig.cpp)
+Util::Config::Node UpstreamDefaultConfig();
 
 // Minimal OSD glue -----------------------------------------------------------
 
@@ -76,106 +82,6 @@ static void SuperSleepUntil(uint64_t target)
   } while (remain > 0);
 }
 
-class CompositedRender3D final : public IRender3D
-{
-public:
-  CompositedRender3D(IRender3D* inner, CRender2D* render2d, GlesPresenter* presenter)
-    : m_inner(inner), m_render2d(render2d), m_presenter(presenter)
-  {
-  }
-
-  void RenderFrame(void) override
-  {
-    if (m_presenter && m_render2d && m_render2d->HasFrame())
-    {
-      const uint32_t* pixels = m_render2d->GetFrameBufferARGB();
-      m_presenter->UpdateFrameARGB(pixels, (int)m_render2d->GetFrameWidth(), (int)m_render2d->GetFrameHeight());
-      m_presenter->Render(false);
-    }
-    if (m_inner)
-      m_inner->RenderFrame();
-  }
-
-  void BeginFrame(void) override
-  {
-    if (m_inner)
-      m_inner->BeginFrame();
-  }
-
-  void EndFrame(void) override
-  {
-    if (m_inner)
-      m_inner->EndFrame();
-  }
-
-  void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height) override
-  {
-    if (m_inner)
-      m_inner->UploadTextures(level, x, y, width, height);
-  }
-
-  void AttachMemory(const uint32_t* cullingRAMLoPtr,
-                    const uint32_t* cullingRAMHiPtr,
-                    const uint32_t* polyRAMPtr,
-                    const uint32_t* vromPtr,
-                    const uint16_t* textureRAMPtr) override
-  {
-    if (m_inner)
-      m_inner->AttachMemory(cullingRAMLoPtr, cullingRAMHiPtr, polyRAMPtr, vromPtr, textureRAMPtr);
-  }
-
-  void SetStepping(int stepping) override
-  {
-    if (m_inner)
-      m_inner->SetStepping(stepping);
-  }
-
-  Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes) override
-  {
-    if (!m_inner)
-      return Result::FAIL;  // was "true" == FAIL (1) under the old OKAY/FAIL defines
-    return m_inner->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes);
-  }
-
-  void SetSunClamp(bool enable) override
-  {
-    if (m_inner)
-      m_inner->SetSunClamp(enable);
-  }
-
-  void SetSignedShade(bool enable) override
-  {
-    if (m_inner)
-      m_inner->SetSignedShade(enable);
-  }
-
-  float GetLosValue(int layer) override
-  {
-    if (!m_inner)
-      return 0.0f;
-    return m_inner->GetLosValue(layer);
-  }
-
-private:
-  IRender3D* m_inner = nullptr;
-  CRender2D* m_render2d = nullptr;
-  GlesPresenter* m_presenter = nullptr;
-};
-
-class NullRender3D : public IRender3D {
-public:
-  void RenderFrame() override {}
-  void BeginFrame() override {}
-  void EndFrame() override {}
-  void UploadTextures(unsigned, unsigned, unsigned, unsigned, unsigned) override {}
-  void AttachMemory(const uint32_t*, const uint32_t*, const uint32_t*, const uint32_t*, const uint16_t*) override {}
-  void SetStepping(int) override {}
-  Result Init(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) override { return Result::OKAY; }
-  void SetSunClamp(bool) override {}
-  void SetSignedShade(bool) override {}
-  float GetLosValue(int) override { return 0.0f; }
-};
-
 class StubOutputs : public COutputs {
 public:
   bool Initialize() override { return true; }
@@ -188,14 +94,6 @@ protected:
 
 static struct Super3Host* g_host = nullptr;
 static GlesPresenter* g_presenter = nullptr;
-
-static void AndroidTileBlit(const uint32_t* pixelsARGB, int width, int height, bool alphaBlend)
-{
-  if (!g_presenter || !pixelsARGB || width <= 0 || height <= 0)
-    return;
-  g_presenter->UpdateFrameARGB(pixelsARGB, width, height);
-  g_presenter->Render(alphaBlend);
-}
 
 static bool IsVonGame(const std::string& name)
 {
@@ -218,16 +116,18 @@ static void GunToViewCoords(float& x, float& y)
 }
 
 struct Super3Host {
-  static constexpr int32_t STATE_FILE_VERSION = 3;
+  static constexpr int32_t STATE_FILE_VERSION = 6;  // upstream Supermodel's; older SUPER3 states (3) are rejected
   Util::Config::Node config{"Global"};
-  AndroidInputSystem inputSystem;
-  CInputs inputs{&inputSystem};
+  std::shared_ptr<AndroidInputSystem> inputSystemPtr = std::make_shared<AndroidInputSystem>();
+  AndroidInputSystem& inputSystem = *inputSystemPtr;
+  CInputs inputs{inputSystemPtr};
   StubOutputs outputs;
-  GlesStubRender3D stub3d;
+  std::shared_ptr<CNetServer> netServer;
+  // Renderers are created on the GL thread once the game is loaded.
+  std::unique_ptr<SuperAA> superAA;
+  std::unique_ptr<CRender2D> render2d;
   std::unique_ptr<New3D::CNew3D> new3d;
-  std::unique_ptr<IRender3D> composited3d;
-  IRender3D* render3d = &stub3d;
-  CRender2D render2d{config};
+  unsigned rendererGeometry[6] = {};
 
   std::unique_ptr<GameLoader> loader;
   std::unique_ptr<CModel3> model3;
@@ -313,6 +213,8 @@ struct Super3Host {
   }
 
   void ApplyDefaults() {
+    // Every setting the core reads, with upstream's defaults; SUPER3's choices follow.
+    config = UpstreamDefaultConfig();
     // Enable the core's sound-board thread so audio can stay smooth even if
     // rendering/input causes occasional stalls on Android.
     config.Set("MultiThreaded", true);
@@ -336,7 +238,8 @@ struct Super3Host {
     config.Set("AndroidClampRamVerts", true);
     config.Set("QuadRendering", false);
     config.Set("FlipStereo", false);
-    // The core expects this node to exist (throws std::range_error otherwise).
+    // 50 MHz as SUPER3 always used; 0 = upstream's per-stepping clock (66/100/166 MHz).
+    // Supermodel.ini can override it.
     config.Set("PowerPCFrequency", "50");
     config.Set("InputSystem", "sdl");
     config.Set("ABSMiceOnly", true);
@@ -378,12 +281,6 @@ struct Super3Host {
     inputSystem.ApplyConfig(config);
   }
 
-  void ApplyAndroidTileBlit()
-  {
-    const bool enabled = config["AndroidTileBlit"].ValueAsDefault<bool>(true);
-    CRender2D::SetAndroidTileBlit(enabled ? &AndroidTileBlit : nullptr);
-  }
-
   void ApplyGameHardOverrides(const std::string& gameName)
   {
     if (IsVonGame(gameName)) {
@@ -417,9 +314,6 @@ struct Super3Host {
     config.Set("InputSystem", "sdl");
     config.Set("Outputs", "none");
     config.Set("ForceFeedback", false);
-
-    // Ensure required nodes exist / sane.
-    config.Set("PowerPCFrequency", "50");
 
     // Keep unsupported rendering knobs clamped on Android.
     config.Set("QuadRendering", false);
@@ -561,7 +455,6 @@ struct Super3Host {
     }
 
     ApplyAndroidHardOverrides();
-    ApplyAndroidTileBlit();
     inputSystem.ApplyConfig(config);
   }
 
@@ -569,7 +462,6 @@ struct Super3Host {
     ApplyDefaults();
     ApplyIniOverrides(std::string());
     ApplyAndroidHardOverrides();
-    ApplyAndroidTileBlit();
     if (!std::filesystem::exists(gamesXml)) {
       ErrorLog("Games XML not found at %s", gamesXml.c_str());
       SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Games XML not found at %s", gamesXml.c_str());
@@ -593,7 +485,7 @@ struct Super3Host {
       }
 
       SDL_Log("Loading ROM definitions...");
-      if (loader->Load(&game, &roms, zipPath, gameName)) {
+      if (loader->Load(&game, &roms, zipPath)) {
         ErrorLog("Failed to load ROM definition for %s", zipPath.c_str());
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Failed to load ROM definition for %s", zipPath.c_str());
         return false;
@@ -621,8 +513,7 @@ struct Super3Host {
       ApplyIniOverrides(game.name);
       ApplyAndroidHardOverrides();
       ApplyGameHardOverrides(game.name);
-      ApplyAndroidTileBlit();
-      if (config["Network"].ValueAsDefault<bool>(false)) {
+        if (config["Network"].ValueAsDefault<bool>(false)) {
         const bool simulate = config["SimulateNet"].ValueAsDefault<bool>(true);
         const unsigned portIn = config["PortIn"].ValueAsDefault<unsigned>(1970);
         const unsigned portOut = config["PortOut"].ValueAsDefault<unsigned>(1971);
@@ -644,37 +535,24 @@ struct Super3Host {
       }
       inputs.LoadFromConfig(config);
 
-      model3 = std::make_unique<CModel3>(config);
+      if (!gameName.empty() && gameName != game.name)
+        SDL_Log("Requested game '%s', zip provides '%s'", gameName.c_str(), game.name.c_str());
 
-      // Most of the legacy core uses OKAY=0 / FAIL=1 semantics even when the
-      // return type is bool. Treat non-zero as failure.
+      // Same order as upstream's desktop front end (Main.cpp): network server,
+      // emulator, Init(), NVRAM. Renderers are attached and Reset() is called on
+      // the GL thread (InstallRenderers).
+      if (game.netboard_present && config["Network"].ValueAsDefault<bool>(false)) {
+        netServer = std::make_shared<CNetServer>(config["PortIn"].ValueAs<unsigned>(), "SUPER3 (" + game.name + ")");
+        netServer->Start();
+      }
+
+      model3 = std::make_unique<CModel3>(config, &inputs, &outputs, netServer);
       SDL_Log("Model3 Init...");
-      if (model3->Init() != Result::OKAY) {
+      if (model3->Init(game, roms) != Result::OKAY) {
         ErrorLog("Model3 Init failed");
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Model3 Init failed");
         return false;
       }
-      SDL_Log("Model3 LoadGame...");
-      if (model3->LoadGame(game, roms) != Result::OKAY) {
-        ErrorLog("Model3 LoadGame failed");
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Model3 LoadGame failed");
-        return false;
-      }
-
-      // Desktop SDL flow attaches inputs/outputs before Reset(); some drive boards
-      // emit force-feedback stop commands during reset and require inputs.
-      SDL_Log("Attaching inputs/outputs...");
-      model3->AttachInputs(&inputs);
-      model3->AttachOutputs(&outputs);
-
-      // TileGen allocates and wires VRAM/palette/register pointers during Init();
-      // attach renderers after Init()/LoadGame() so Render2D sees valid pointers.
-      SDL_Log("Attaching renderers...");
-      model3->AttachRenderers(&render2d, render3d);
-
-      // Establish initial CPU/device state (ppc_reset(), etc).
-      SDL_Log("Model3 Reset...");
-      model3->Reset();
 
       // Persisted test menu settings (e.g., Daytona 2 Link ID = SINGLE).
       LoadNVRAMIfPresent();
@@ -809,7 +687,7 @@ struct Super3Host {
       }
 
       CBlockFile SaveState;
-      if (Result::OKAY != SaveState.Create(filePath, "Supermodel Save State", "Supermodel Version " SUPERMODEL_VERSION))
+      if (Result::OKAY != SaveState.Create(filePath, "Supermodel Save State", ("Supermodel Version " + SupermodelVersion()).c_str()))
       {
         ErrorLog("Unable to save state to '%s'.", filePath.c_str());
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to save state to '%s'.", filePath.c_str());
@@ -859,31 +737,37 @@ struct Super3Host {
       SDL_Log("Loaded state from '%s'.", filePath.c_str());
     }
 
-  bool InstallNew3D(GlesPresenter* presenter,
-                    unsigned xOff,
-                    unsigned yOff,
-                    unsigned xRes,
-                    unsigned yRes,
-                    unsigned totalXRes,
-                    unsigned totalYRes)
+  // Creates the renderers (GL thread), or re-initializes them when the drawable
+  // size changes, as upstream does on a window resize. The first time, the
+  // emulator is reset after the renderers are attached, as upstream does.
+  bool InstallRenderers(unsigned xOff, unsigned yOff, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes)
   {
-    if (!model3 || new3d)
-      return !!new3d;
+    if (!model3)
+      return false;
+    const unsigned geometry[6] = { xOff, yOff, xRes, yRes, totalXRes, totalYRes };
+    if (new3d && std::equal(geometry, geometry + 6, rendererGeometry))
+      return true;
 
-    SDL_Log("Initializing New3D (GLES) ...");
-    SDL_Log("New3DAccurate=%d", config["New3DAccurate"].ValueAsDefault<bool>(false) ? 1 : 0);
-    new3d = std::make_unique<New3D::CNew3D>(config, game.name);
-    if (new3d->Init(xOff, yOff, xRes, yRes, totalXRes, totalYRes) != Result::OKAY)
+    const bool first = !new3d;
+    const UpscaleMode upscaleMode = (UpscaleMode)config["UpscaleMode"].ValueAsDefault<int>(2);
+    SDL_Log("%s renderers: view %ux%u at %u,%u in %ux%u", first ? "Creating" : "Resizing", xRes, yRes, xOff, yOff, totalXRes, totalYRes);
+    if (first) {
+      superAA = std::make_unique<SuperAA>(1, CRTcolor::None);
+      render2d = std::make_unique<CRender2D>(config);
+      new3d = std::make_unique<New3D::CNew3D>(config, game.name);
+    }
+    if (render2d->Init(xOff, yOff, xRes, yRes, totalXRes, totalYRes, 0, upscaleMode) != Result::OKAY ||
+        new3d->Init(xOff, yOff, xRes, yRes, totalXRes, totalYRes, 0) != Result::OKAY)
     {
-      SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "New3D Init failed");
-      new3d.reset();
+      SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Renderer Init failed");
       return false;
     }
-
-    composited3d = std::make_unique<CompositedRender3D>(new3d.get(), &render2d, presenter);
-    render3d = composited3d.get();
-    model3->AttachRenderers(&render2d, render3d);
-    SDL_Log("New3D attached");
+    std::copy(geometry, geometry + 6, rendererGeometry);
+    model3->AttachRenderers(render2d.get(), new3d.get(), superAA.get());
+    if (first) {
+      SDL_Log("Model3 Reset...");
+      model3->Reset();
+    }
     return true;
   }
 };
@@ -1068,12 +952,10 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     return 1;
   }
 
+  InstallAndroidLogger();
   Super3Host host;
   g_presenter = &presenter;
   g_host = &host;
-  // Initialize renderer backends up-front. The core will attach VRAM/palette/register
-  // pointers later (after it has initialized the tile generator).
-  host.render2d.Init(0, 0, 496, 384, 496, 384);
 
   // Locate resources. Prefer app-specific external storage (no runtime perms),
   // but also probe common legacy locations for dev convenience.
@@ -1139,7 +1021,7 @@ extern "C" int SDL_main(int argc, char* argv[]) {
   bool backgrounded = false;
   bool loggedControls = false;
   bool audioOpened = false;
-  bool new3dAttached = false;
+  bool renderersReady = false;
   g_perfCounterFrequency = SDL_GetPerformanceFrequency();
   if (g_perfCounterFrequency == 0)
     g_perfCounterFrequency = 1;
@@ -1216,7 +1098,6 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     const unsigned yOff = (totalYRes - yRes) / 2;
 
     const bool wideScreen = host.config["WideScreen"].ValueAsDefault<bool>(false);
-    const bool wideBackground = host.config["WideBackground"].ValueAsDefault<bool>(false);
 
     // Clear full drawable (scissor off), then set scissor like desktop.
     glDisable(GL_SCISSOR_TEST);
@@ -1246,34 +1127,12 @@ extern "C" int SDL_main(int argc, char* argv[]) {
         SDL_Log("Controls (touch): bottom-left=COIN, bottom-right=START, top-left=SERVICE, top-right=TEST, left-middle=DPAD/STEER, right-middle=THROTTLE/BRAKE");
       }
 
-      const bool useNew3d = host.config["New3DEngine"].ValueAsDefault<bool>(true);
-      if (useNew3d && !new3dAttached) {
-        new3dAttached = host.InstallNew3D(&presenter, xOff, yOff, xRes, yRes, totalXRes, totalYRes);
-      }
+      if (!renderersReady || host.rendererGeometry[4] != totalXRes || host.rendererGeometry[5] != totalYRes)
+        renderersReady = host.InstallRenderers(xOff, yOff, xRes, yRes, totalXRes, totalYRes);
 
-      if (new3dAttached) {
-        // 3D path: let New3D draw into the default framebuffer from inside the core (scissored).
-        presenter.Resize(winW, winH);
-        presenter.SetStretch(false);
+      // The core draws the whole frame: 2D bottom layer, 3D, 2D top layer.
+      if (renderersReady)
         host.RunFrame();
-
-        // Overlay TileGen top layers (HUD/menus) on top of 3D.
-        if (host.render2d.HasTopSurface()) {
-          const uint32_t* pixels = host.render2d.GetTopSurfaceARGB();
-          presenter.UpdateFrameARGB(pixels, (int)host.render2d.GetFrameWidth(), (int)host.render2d.GetFrameHeight());
-          presenter.Render(true);
-        }
-      } else {
-        // 2D-only path: keep showing TileGen software output.
-        presenter.Resize(winW, winH);
-        presenter.SetStretch(wideBackground);
-        host.RunFrame();
-        if (host.render2d.HasFrame()) {
-          const uint32_t* pixels = host.render2d.GetFrameBufferARGB();
-          presenter.UpdateFrameARGB(pixels, (int)host.render2d.GetFrameWidth(), (int)host.render2d.GetFrameHeight());
-          presenter.Render(false);
-        }
-      }
     }
 
     if (state == 1) {

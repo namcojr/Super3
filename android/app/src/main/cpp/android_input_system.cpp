@@ -940,7 +940,7 @@ void AndroidInputSystem::HandleTouchMotion(const SDL_TouchFingerEvent& tf)
   HandleTouch(tf, true);
 }
 
-int AndroidInputSystem::GetNumMice()
+int AndroidInputSystem::GetNumMice() const
 {
   return m_gunTouchEnabled ? 1 : 0;
 }
@@ -954,7 +954,7 @@ const MouseDetails* AndroidInputSystem::GetMouseDetails(int mseNum)
   return nullptr;
 }
 
-int AndroidInputSystem::GetMouseAxisValue(int mseNum, int axisNum)
+int AndroidInputSystem::GetMouseAxisValue(int mseNum, int axisNum) const
 {
   if (!m_gunTouchEnabled)
     return 0;
@@ -981,7 +981,7 @@ int AndroidInputSystem::GetMouseAxisValue(int mseNum, int axisNum)
   }
 }
 
-int AndroidInputSystem::GetMouseWheelDir(int mseNum)
+int AndroidInputSystem::GetMouseWheelDir(int mseNum) const
 {
   if (!m_gunTouchEnabled)
     return 0;
@@ -990,7 +990,7 @@ int AndroidInputSystem::GetMouseWheelDir(int mseNum)
   return m_mouseWheelDir;
 }
 
-bool AndroidInputSystem::IsMouseButPressed(int mseNum, int butNum)
+bool AndroidInputSystem::IsMouseButPressed(int mseNum, int butNum) const
 {
   if (!m_gunTouchEnabled)
     return false;
@@ -1280,7 +1280,7 @@ void AndroidInputSystem::RefreshControllers()
   }
 }
 
-int AndroidInputSystem::GetNumJoysticks()
+int AndroidInputSystem::GetNumJoysticks() const
 {
   if (UseVirtualJoystick())
     return 1;
@@ -1400,7 +1400,7 @@ bool AndroidInputSystem::ButtonPressedFor(const ControllerState& c, int butNum) 
   return SDL_JoystickGetButton(c.joystick, butNum) != 0;
 }
 
-int AndroidInputSystem::GetJoyAxisValue(int joyNum, int axisNum)
+int AndroidInputSystem::GetJoyAxisValue(int joyNum, int axisNum) const
 {
   if (m_gunStickAimEnabled && m_virtualAnalogJoystickEnabled && !UseVirtualJoystick() &&
       (axisNum == AXIS_X || axisNum == AXIS_Y || axisNum == AXIS_RX || axisNum == AXIS_RY))
@@ -1446,7 +1446,7 @@ int AndroidInputSystem::GetJoyAxisValue(int joyNum, int axisNum)
   return AxisValueFor(m_controllers[static_cast<size_t>(joyNum)], axisNum);
 }
 
-bool AndroidInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir)
+bool AndroidInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir) const
 {
   if (m_controllers.empty())
     return false;
@@ -1467,7 +1467,7 @@ bool AndroidInputSystem::IsJoyPOVInDir(int joyNum, int povNum, int povDir)
   return PovPressedFor(m_controllers[static_cast<size_t>(joyNum)], povNum, povDir);
 }
 
-bool AndroidInputSystem::IsJoyButPressed(int joyNum, int butNum)
+bool AndroidInputSystem::IsJoyButPressed(int joyNum, int butNum) const
 {
   if (m_controllers.empty())
     return false;
@@ -1565,7 +1565,7 @@ const char* AndroidInputSystem::GetKeyName(int keyIndex)
   return SDL_GetScancodeName(static_cast<SDL_Scancode>(keyIndex));
 }
 
-bool AndroidInputSystem::IsKeyPressed(int /*kbdNum*/, int keyIndex)
+bool AndroidInputSystem::IsKeyPressed(int /*kbdNum*/, int keyIndex) const
 {
   if (keyIndex <= SDL_SCANCODE_UNKNOWN || keyIndex >= SDL_NUM_SCANCODES)
     return false;

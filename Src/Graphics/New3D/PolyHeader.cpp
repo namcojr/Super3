@@ -1,3 +1,23 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #include "Supermodel.h"
 #include "PolyHeader.h"
 
@@ -8,9 +28,10 @@ PolyHeader::PolyHeader()
 	header = nullptr;
 }
 
-PolyHeader::PolyHeader(UINT32* h) 
+PolyHeader::PolyHeader(UINT32* h, const UINT32* e)
 {
 	header = h;
+	end = e;
 }
 
 void PolyHeader::operator = (const UINT32* h) 
@@ -23,13 +44,32 @@ UINT32* PolyHeader::StartOfData()
 	return header + 7;	// 7 is size of header in bytes, data immediately follows
 }
 
+bool PolyHeader::InBounds()
+{
+	if (!end) {
+		return true;
+	}
+
+	if (header + 7 > end) {
+		return false;													// header itself
+	}
+
+	return header + 7 + (NumVerts() - NumSharedVerts()) * 4 <= end;		// plus its vertex data
+}
+
 bool PolyHeader::NextPoly()
 {
 	if (LastPoly()) {
 		return false;
 	}
 
+	UINT32* const current = header;
 	header += 7 + (NumVerts() - NumSharedVerts()) * 4;
+
+	if (!InBounds()) {		// no last-poly flag before the end of memory (garbage model, e.g. games loading the GPU during boot sync)
+		header = current;	// stay on the last valid polygon
+		return false;
+	}
 
 	return true;
 }
@@ -50,10 +90,6 @@ int	PolyHeader::NumPolysTotal()
 
 int	PolyHeader::NumTrianglesTotal()
 {
-	if (header[6] == 0) {
-		return 0;			// no poly data
-	}
-
 	UINT32* start = header;	// save start address
 
 	int count = (NumVerts() == 4) ? 2 : 1;
@@ -152,7 +188,7 @@ bool PolyHeader::DoubleSided()
 
 bool PolyHeader::LastPoly() 
 {
-	if ((header[1] & 4) > 0 || header[6] == 0) {
+	if ((header[1] & 4) > 0) {
 		return true;
 	}
 
@@ -177,6 +213,11 @@ bool PolyHeader::SmoothShading()
 bool PolyHeader::NoLosReturn()
 {
 	return (header[1] & 0x1) > 0;
+}
+
+bool PolyHeader::EdgeOnTranslucency()
+{
+	return (header[1] & 0x80) > 0;
 }
 
 //
@@ -291,22 +332,19 @@ int PolyHeader::X()
 
 int PolyHeader::Y()
 {
-	//=======
+	//====
 	int y;
-	int page;
-	//=======
+	//====
 
-	if (Page()) {
-		page = 1024;
-	}
-	else {
-		page = 0;
-	}
-
-	y = (32 * (header[5] & 0x1F) + page);	// if we hit 2nd page add 1024 to y coordinate
+	y = 32 * (header[5] & 0x1F);	// if we hit 2nd page add 1024 to y coordinate
 	y &= 2047;
 
 	return y;
+}
+
+float PolyHeader::TextureNP()
+{
+	return (float)(header[5] >> 8);
 }
 
 //
@@ -408,6 +446,7 @@ UINT64 PolyHeader::Hash()
 	hash |= (UINT64)FixedShading() << 34;										// bits 34 fixed shading
 	hash |= (UINT64)(header[0] >> 26) << 35;									// bits 35-40 specular coefficient (opacity)
 	hash |= (UINT64)(header[6] & 0x3FFFF) << 41;								// bits 41-58 Translucency pattern select / disable lighting / Polygon light modifier / Texture enable / Texture format / Shininess / High priority / Layered polygon / Translucency mode
+	hash |= (UINT64)NoLosReturn() << 59;										// bits 59 no line of sight return
 
 	return hash;
 }

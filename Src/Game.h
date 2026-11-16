@@ -1,8 +1,29 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef INCLUDED_GAME_H
 #define INCLUDED_GAME_H
 
 #include <string>
 #include <memory>
+#include <cstdint>
 
 struct Game
 {
@@ -12,8 +33,73 @@ struct Game
   std::string version;
   std::string manufacturer;
   unsigned year = 0;
-  std::string stepping;
-  std::string mpeg_board;
+  unsigned polygon_memory = 0;  // Real3D PRO-1000: polygon memory in MB (0 = not given)
+  enum Platform
+  {
+    PLATFORM_MODEL3 = 0,  // Sega Model 3 arcade hardware
+    PLATFORM_PRO1000,     // Real3D PRO-1000 image generator
+    PLATFORM_MODEL1,      // Sega Model 1 arcade hardware
+    PLATFORM_MODEL2       // Sega Model 2 arcade hardware
+  };
+  Platform platform = Platform::PLATFORM_MODEL3;
+  // Hardware stepping. Games.xml: "1.0", "1.5", "2.0", or "2.1" (Model 3),
+  // "1100", "1200", or "1400" (PRO-1000 model; 1100 if not given), none (Model
+  // 1), and "2" (original), "2A", "2B", or "2C" (Model 2; 2A if not given).
+  // GameLoader makes sure that it is a stepping of the platform. Ordered
+  // comparisons are permitted only between steppings of the same platform.
+  enum class Stepping
+  {
+    UNKNOWN = 0,
+    MODEL3_1_0,     // Sega Model 3 Step 1.0
+    MODEL3_1_5,     // Sega Model 3 Step 1.5
+    MODEL3_2_0,     // Sega Model 3 Step 2.0
+    MODEL3_2_1,     // Sega Model 3 Step 2.1
+    PRO1000_1100,   // Real3D PRO-1100 (1 pixel processor)
+    PRO1000_1200,   // Real3D PRO-1200 (2 pixel processors)
+    PRO1000_1400,   // Real3D PRO-1400 (4 pixel processors)
+    MODEL1,         // Sega Model 1 (one stepping)
+    MODEL2,         // Sega Model 2 (original)
+    MODEL2A,        // Sega Model 2A-CRX
+    MODEL2B,        // Sega Model 2B-CRX
+    MODEL2C         // Sega Model 2C-CRX
+  };
+  Stepping stepping = Stepping::UNKNOWN;
+
+  // Returns the name of the stepping for display ("Model 3 Step 1.5",
+  // "PRO-1100", ...)
+  static const char *SteppingName(Stepping stepping)
+  {
+    switch (stepping)
+    {
+    case Stepping::MODEL3_1_0:    return "Model 3 Step 1.0";
+    case Stepping::MODEL3_1_5:    return "Model 3 Step 1.5";
+    case Stepping::MODEL3_2_0:    return "Model 3 Step 2.0";
+    case Stepping::MODEL3_2_1:    return "Model 3 Step 2.1";
+    case Stepping::PRO1000_1100:  return "PRO-1100";
+    case Stepping::PRO1000_1200:  return "PRO-1200";
+    case Stepping::PRO1000_1400:  return "PRO-1400";
+    case Stepping::MODEL1:        return "Model 1";
+    case Stepping::MODEL2:        return "Model 2";
+    case Stepping::MODEL2A:       return "Model 2A";
+    case Stepping::MODEL2B:       return "Model 2B";
+    case Stepping::MODEL2C:       return "Model 2C";
+    default:                      return "Unknown";
+    }
+  }
+
+  // Returns true if the stepping is a Real3D PRO-1000 model
+  static bool IsPro1000Stepping(Stepping stepping)
+  {
+    return stepping == Stepping::PRO1000_1100 || stepping == Stepping::PRO1000_1200 || stepping == Stepping::PRO1000_1400;
+  }
+
+  enum MpegBoardType
+  {
+    MPEG_BOARD_NONE = 0,
+    MPEG_BOARD_DSB1,
+    MPEG_BOARD_DSB2
+  };
+  MpegBoardType mpeg_board = MpegBoardType::MPEG_BOARD_NONE;
   enum AudioTypes
   {
       MONO = 0,             // Merge DSB+SCSP1+SCSP2 to 1 channel mono
@@ -26,11 +112,8 @@ struct Game
       QUAD_1_LR_2_FR_MIX,   // Specific srally2: Split SCSP2 and mix first channel to DSB+SCP11 Front Left/Right and second to Read Left/Right
   };
   AudioTypes audio = STEREO_LR;
-  std::string pci_bridge;               // overrides default PCI bridge type for stepping (empty string for default)
-  uint32_t real3d_pci_id = 0;           // overrides default Real3D PCI ID for stepping (0 for default)
-  float real3d_status_bit_set_percent_of_frame = 0; // overrides default status bit timing (0 for default)
   uint32_t encryption_key = 0;
-  bool netboard_present;
+  bool netboard_present = false;
 
   enum Inputs
   {
@@ -57,7 +140,10 @@ struct Game
     INPUT_SKI             = 0x00080000, // ski controls
     INPUT_MAGTRUCK        = 0x00100000, // magical truck controls
     INPUT_FISHING         = 0x00200000, // fishing controls
-    INPUT_ALL             = 0x003FFFFF
+    INPUT_THROTTLE        = 0x00400000, // throttle lever (Model 1 flight games)
+    INPUT_ANALOG_JOYSTICK2= 0x00800000, // second analog joystick (Star Wars Arcade gunner)
+    INPUT_FLIGHT_VIEW4    = 0x01000000, // four view buttons (Wing War)
+    INPUT_ALL             = 0x01FFFFFF
   };
   uint32_t inputs = 0;
 
@@ -67,7 +153,8 @@ struct Game
     DRIVE_BOARD_WHEEL,
     DRIVE_BOARD_JOYSTICK,
     DRIVE_BOARD_SKI,
-    DRIVE_BOARD_BILLBOARD
+    DRIVE_BOARD_BILLBOARD,
+    DRIVE_BOARD_MOTION    // Model 2 motion slider (Manx TT DX)
   };
   DriveBoardType driveboard_type = DriveBoardType::DRIVE_BOARD_NONE;
 };

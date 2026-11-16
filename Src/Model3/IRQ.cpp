@@ -65,7 +65,7 @@ void CIRQ::LoadState(CBlockFile *SaveState)
  Emulation Functions
 ******************************************************************************/
 
-void CIRQ::Assert(unsigned irqBits)
+void CIRQ::Assert(uint16_t irqBits)
 {
 	irqState |= irqBits;
 	if ((irqState&irqEnable))	// low 8 bits are maskable interrupts
@@ -74,7 +74,7 @@ void CIRQ::Assert(unsigned irqBits)
 		ppc_set_irq_line(1);
 }
 
-void CIRQ::Deassert(unsigned irqBits)
+void CIRQ::Deassert(uint16_t irqBits)
 {
 	irqState &= ~irqBits;
 	if (!(irqState & irqEnable) && !(irqState & (~0xFF)))
@@ -86,12 +86,12 @@ void CIRQ::WriteIRQEnable(UINT8 data)
 	irqEnable = (unsigned) data;
 }
 
-UINT8 CIRQ::ReadIRQEnable(void)
+UINT8 CIRQ::ReadIRQEnable(void) const
 {
 	return (UINT8) (irqEnable&0xFF);
 }
 
-UINT8 CIRQ::ReadIRQState(void)
+UINT8 CIRQ::ReadIRQState(void) const
 {
 	return (UINT8) (irqState&0xFF);
 }
@@ -112,7 +112,9 @@ void CIRQ::Init(void)
 	// this function really only exists for consistency with other device classes
 }
 
-CIRQ::CIRQ(void)
+CIRQ::CIRQ(void) :
+	irqEnable(0),
+	irqState(0)
 {	
 	DebugLog("Built IRQ controller\n");
 }

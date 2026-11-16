@@ -1,3 +1,23 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef INCLUDED_GAMELOADER_H
 #define INCLUDED_GAMELOADER_H
 
@@ -15,10 +35,10 @@ private:
   struct File
   {
     typedef std::shared_ptr<File> ptr_t;
-    uint32_t offset;
     std::string filename;
-    uint32_t crc32;
-    bool has_crc32;
+    uint32_t offset = 0;
+    uint32_t crc32 = 0;
+    bool has_crc32 = false;
     static ptr_t Create(const GameLoader &loader, const Util::Config::Node &file_node);
     bool Matches(const std::string &filename, uint32_t crc32) const;
     bool operator==(const File &rhs) const;
@@ -29,10 +49,11 @@ private:
   {
     typedef std::shared_ptr<Region> ptr_t;
     std::string region_name;
-    size_t stride;
-    size_t chunk_size;
-    bool byte_swap;
-    bool required;
+    uint32_t stride = 0;
+    uint32_t chunk_size = 0;
+    std::string byte_layout;
+    bool required = false;
+    bool merge = true;    // in a child set: merged with the parent's region (else replaces it; with no files, removes it)
     std::vector<File::ptr_t> files;
     static ptr_t Create(const GameLoader &loader, const Util::Config::Node &region_node);
     bool AttribsMatch(const ptr_t &other) const;
@@ -41,6 +62,7 @@ private:
 
   // Game information from XML
   std::map<std::string, Game> m_game_info_by_game;
+  std::map<std::string, size_t> m_game_order;   // position in the XML file (the first listed is preferred)
 
   // ROM patches by game and by region. Cannot place into Region because child
   // sets do not inherit parent patches, which may complicate merging.
@@ -59,7 +81,7 @@ private:
     unzFile zf = nullptr;
     std::string zipfilename;  // zip archive
     std::string filename;     // file inside the zip archive
-    size_t uncompressed_size = 0;
+    uint32_t uncompressed_size = 0;
     uint32_t crc32 = 0;
   };
 
@@ -82,7 +104,7 @@ private:
   bool LoadZipArchive(ZipArchive *zip, const std::string &zipfilename) const;
   const ZippedFile *LookupFile(const File::ptr_t &file, const ZipArchive &zip) const;
   bool FileExistsInZipArchive(const File::ptr_t &file, const ZipArchive &zip) const;
-  bool LoadZippedFile(std::shared_ptr<uint8_t> *buffer, size_t *file_size, const GameLoader::File::ptr_t &file, const ZipArchive &zip) const;
+  bool LoadZippedFile(std::shared_ptr<uint8_t> *buffer, uint32_t *file_size, const GameLoader::File::ptr_t &file, const ZipArchive &zip) const;
   static bool MissingAttrib(const GameLoader &loader, const Util::Config::Node &node, const std::string &attribute);
   bool LoadGamesFromXML(const Util::Config::Node &xml);
   bool MergeChildrenWithParents();
@@ -99,12 +121,10 @@ private:
   void ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename) const;
   bool LoadRegion(ROM *buffer, const GameLoader::Region::ptr_t &region, const ZipArchive &zip) const;
   bool LoadROMs(ROMSet *rom_set, const std::string &game_name, const ZipArchive &zip) const;
-  std::string ChooseGame(const std::set<std::string> &games_found, const std::string &zipfilename) const;
-  static bool CompareFilesByName(const File::ptr_t &a,const File::ptr_t &b);
 
 public:
   GameLoader(const std::string &xml_file);
-  bool Load(Game *game, ROMSet *rom_set, const std::string &zipfilename, const std::string &game_name) const;
+  bool Load(Game *game, ROMSet *rom_set, const std::string &zipfilename) const;
   const std::map<std::string, Game> &GetGames() const
   {
     return m_game_info_by_game;

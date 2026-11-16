@@ -1,55 +1,121 @@
+/**
+ ** Supermodel
+ ** A Sega Model 3 Arcade Emulator.
+ ** Copyright 2003-2026 The Supermodel Team
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #include "New3D.h"
-#include "Texture.h"
 #include "Vec.h"
 #include <cmath>
 #include <algorithm>
-#include <cstdint>
 #include <limits>
 #include <cstring>
 #include <unordered_map>
 #include "R3DFloat.h"
 #include "Util/BitCast.h"
-#include "OSD/Logger.h"
 
-#ifdef __ANDROID__
-#define MAX_RAM_VERTS 150000
-#define MAX_ROM_VERTS 500000
-#else
 #define MAX_RAM_VERTS 300000
 #define MAX_ROM_VERTS 1500000
-#endif
 
 #define BYTE_TO_FLOAT(B)	((2.0f * (B) + 1.0f) * (float)(1.0/255.0))
 
+#define NEAR_PLANE 1e-3f
+
 namespace New3D {
 
-CNew3D::CNew3D(const Util::Config::Node &config, const std::string& gameName)
-	: m_config(config),
-	  m_r3dShader(config),
-	  m_gameName(gameName)
+CNew3D::CNew3D(const Util::Config::Node &config, const std::string& gameName) : 
+	m_gameName(gameName),
+	m_blockCulling(false),
+	m_cullingRAMLo(nullptr),
+	m_cullingRAMHi(nullptr),
+	m_polyRAM(nullptr),
+	m_vrom(nullptr),
+	m_textureRAM(nullptr),
+	m_xRatio(0),
+	m_yRatio(0),
+	m_xOffs(0),
+	m_yOffs(0),
+	m_xRes(0),
+	m_yRes(0),
+	m_totalXRes(0),
+	m_totalYRes(0),
+	m_wideScreen(false),
+	m_matrixBasePtr(nullptr),
+	m_LODBlendTable(nullptr),
+	m_prev{{}},
+	m_prevTexCoords{{}},
+	m_vao(0),
+	m_r3dShader(config),
+	m_r3dScrollFog(),
+	m_aaTarget(0)
 {
-	m_cullingRAMLo	= nullptr;
-	m_cullingRAMHi	= nullptr;
-	m_polyRAM		= nullptr;
-	m_vrom			= nullptr;
-	m_textureRAM	= nullptr;
 	m_sunClamp		= true;
-	m_shadeIsSigned = true;
-	m_new3dAccurate = config["New3DAccurate"].ValueAsDefault<bool>(false);
 	m_numPolyVerts	= 3;
 	m_primType		= GL_TRIANGLES;
 
-#ifndef __ANDROID__
 	if (config["QuadRendering"].ValueAs<bool>()) {
 		m_numPolyVerts	= 4;
 		m_primType		= GL_LINES_ADJACENCY;
 	}
-#endif
+
+	m_wideScreen = config["WideScreen"].ValueAs<bool>();
+	m_noWhiteFlash = config["NoWhiteFlash"].ValueAs<bool>();
+
+	m_r3dShader.LoadShader();
+	glUseProgram(0);
+
+	// setup up our vertex buffer memory
+
+	glGenVertexArrays(1, &m_vao);
+	glBindVertexArray(m_vao);
+	m_vbo.Create(GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW, sizeof(FVertex) * (MAX_RAM_VERTS + MAX_ROM_VERTS));
+	m_vbo.Bind(true);
+
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inVertex"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inNormal"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inTexCoord"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inColour"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inFaceNormal"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inFixedShade"));
+	glEnableVertexAttribArray(m_r3dShader.GetVertexAttribPos("inTextureNP"));
+
+	// before draw, specify vertex and index arrays with their offsets, offsetof is maybe evil ..
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inVertex"), 4, GL_FLOAT, GL_FALSE, sizeof(FVertex), 0);
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inNormal"), 3, GL_FLOAT, GL_FALSE, sizeof(FVertex), (void*)offsetof(FVertex, base.normal));
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inTexCoord"), 2, GL_FLOAT, GL_FALSE, sizeof(FVertex), (void*)offsetof(FVertex, base.texcoords));
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inColour"), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(FVertex), (void*)offsetof(FVertex, faceColour));
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inFaceNormal"), 3, GL_FLOAT, GL_FALSE, sizeof(FVertex), (void*)offsetof(FVertex, faceNormal));
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inFixedShade"), 1, GL_FLOAT, GL_FALSE, sizeof(FVertex), (void*)offsetof(FVertex, base.fixedShade));
+	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inTextureNP"), 1, GL_FLOAT, GL_FALSE, sizeof(FVertex), (void*)offsetof(FVertex, textureNP));
+
+	glBindVertexArray(0);
+	m_vbo.Bind(false);
 }
 
 CNew3D::~CNew3D()
 {
 	m_vbo.Destroy();
+	if (m_vao) {
+		glDeleteVertexArrays(1, &m_vao);
+		m_vao = 0;
+	}
+
+	m_r3dShader.UnloadShader();
 }
 
 void CNew3D::AttachMemory(const UINT32 *cullingRAMLoPtr, const UINT32 *cullingRAMHiPtr, const UINT32 *polyRAMPtr, const UINT32 *vromPtr, const UINT16 *textureRAMPtr)
@@ -59,218 +125,293 @@ void CNew3D::AttachMemory(const UINT32 *cullingRAMLoPtr, const UINT32 *cullingRA
 	m_polyRAM		= polyRAMPtr;
 	m_vrom			= vromPtr;
 	m_textureRAM	= textureRAMPtr;
+
+	m_textureBank[0].AttachMemory(textureRAMPtr);
+	m_textureBank[1].AttachMemory(textureRAMPtr + (2048*1024));
 }
 
-void CNew3D::SetStepping(int stepping)
+void CNew3D::SetStepping(Game::Stepping stepping)
 {
-	m_step = stepping;
+	// The Pro-1000 uses the Step 1.0 formats
+	m_step10 = stepping == Game::Stepping::MODEL3_1_0 || Game::IsPro1000Stepping(stepping);
+	m_step15 = stepping == Game::Stepping::MODEL3_1_5;
 
-	if ((m_step != 0x10) && (m_step != 0x15) && (m_step != 0x20) && (m_step != 0x21)) {
-		m_step = 0x10;
-	}
-
-	if (m_step > 0x10) {
+	if (!m_step10) {
 		m_offset = 0;							// culling nodes are 10 words
 		m_vertexFactor = (1.0f / 2048.0f);		// vertices are in 13.11 format
+		m_textureNPFactor = (1.0f / 16384.0f);	// texture NP values are in 10.14 format
 	}
 	else {
 		m_offset = 2;							// 8 words
 		m_vertexFactor = (1.0f / 128.0f);		// 17.7
+		m_textureNPFactor = (1.0f / 4096.0f);	// 12.12
 	}
-
-	m_vbo.Create(GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW, sizeof(FVertex) * (MAX_RAM_VERTS + MAX_ROM_VERTS));
 }
 
-Result CNew3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam)
+void CNew3D::SetVROMIsPolygonRAM(bool enable)
 {
-	// Resolution and offset within physical display area
-	m_xRatio	= xRes * (float)(1.0 / 496.0);
-	m_yRatio	= yRes * (float)(1.0 / 384.0);
+	m_vromIsPolygonRAM = enable;
+}
+
+void CNew3D::SetScreenSize(float width, float height)
+{
+	m_screenWidth  = width;
+	m_screenHeight = height;
+	// If Init() has run, recalculate ratios immediately so the next frame uses the new values.
+	if (m_xRes)
+	{
+		m_xRatio = m_xRes / m_screenWidth;
+		m_yRatio = m_yRes / m_screenHeight;
+	}
+}
+
+Result CNew3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam, unsigned aaTarget)
+{
+	// Scale from native display coordinates to screen pixels.
+	// m_screenWidth/Height hold the native coordinate range (496x384 for
+	// Model 3, sync-file dependent for Pro-1000).
+	m_xRatio	= xRes / m_screenWidth;
+	m_yRatio	= yRes / m_screenHeight;
 	m_xOffs		= xOffset;
 	m_yOffs		= yOffset;
-	m_xRes    = xRes;
-	m_yRes    = yRes;
+	m_xRes		= xRes;
+	m_yRes		= yRes;
 	m_totalXRes	= totalXResParam;
 	m_totalYRes = totalYResParam;
+	m_aaTarget	= aaTarget;
 
-	m_r3dShader.LoadShader();
-#ifndef __ANDROID__
-	if (!m_r3dFrameBuffers)
-		m_r3dFrameBuffers = std::make_unique<R3DFrameBuffers>();
-	if (!m_r3dScrollFog)
-		m_r3dScrollFog = std::make_unique<R3DScrollFog>(m_config);
-	m_r3dFrameBuffers->CreateFBO((int)totalXResParam, (int)totalYResParam);
-#else
-	if (m_new3dAccurate) {
-		if (!m_r3dFrameBuffers)
-			m_r3dFrameBuffers = std::make_unique<R3DFrameBuffers>();
-		if (!m_r3dScrollFog)
-			m_r3dScrollFog = std::make_unique<R3DScrollFog>(m_config);
-		if (!m_r3dFrameBuffers->CreateFBO((int)totalXResParam, (int)totalYResParam)) {
-			m_r3dFrameBuffers.reset();
-			m_r3dScrollFog.reset();
-			m_new3dAccurate = false;
-		}
-	}
-#endif
+	m_r3dFrameBuffers.DestroyFBO();		// remove any old ones if created
 
-	glUseProgram(0);
-
-	return Result::OKAY;	// Result::OKAY ? wtf ..
+	return m_r3dFrameBuffers.CreateFBO(totalXResParam, totalYResParam);
 }
 
 void CNew3D::UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height)
 {
-	if (level == 0) {
-		m_texSheet.Invalidate(x, y, width, height);		// base textures only
-	} 
-	else if (level == 1) {
-		// we want to work out what the base level is, and invalidate the entire texture
-		// the mipmap data in some cases is being sent later
+	// handle case of entire sheet invalidation
+	if (width == 2048 && height == 2048) {
 
-		int page = y / 1024;
-		y -= (page * 1024);	// remove page from tex y
+		height = 1024;
 
-		int xPos = (x - 1024) * 2;
-		int yPos = (y - 512) * 2;
+		static constexpr int mipXBase[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
+		static constexpr int mipYBase[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023 };
 
-		yPos += page * 1024;
-		width *= 2;
-		height *= 2;
+		for (int i = 0; i < m_textureBank[0].GetNumberOfLevels(); i++) {
+			m_textureBank[0].UploadTextures(i, mipXBase[i], mipYBase[i], width, height);
+			m_textureBank[1].UploadTextures(i, mipXBase[i], mipYBase[i], width, height);
+			width = (width > 1) ? width / 2 : 1;
+			height = (height > 1) ? height / 2 : 1;
+		}
 
-		m_texSheet.Invalidate(xPos, yPos, width, height);
+		return;
 	}
+
+	int page;
+	TranslateTexture(x, y, width, height, page);
+
+	m_textureBank[page].UploadTextures(level, x, y, width, height);
 }
 
 void CNew3D::DrawScrollFog()
 {
-#ifdef __ANDROID__
-	if (!m_new3dAccurate) {
-		return;
-	}
-#endif
 	// this is my best guess at the logic based upon what games are doing
 	//
 	// ocean hunter		- every viewport has scroll fog values set. Must start with lowest priority layers as the higher ones sometimes are garbage
 	// scud race		- first viewports in priority layer missing scroll values. The latter ones all contain valid scroll values.
-	// daytona			- doesn't seem to use scroll fog at all. Will set scroll values for the first viewports, the end ones contain no scroll values
+	// daytona			- doesn't seem to use scroll fog at all. Will set scroll values for the first viewports, the end ones contain no scroll values. End credits have scroll fog, but constrained to the viewport
 	// vf3				- first viewport only has it set. But set with highest select value ?? Rest of the viewports in priority layer contain a lower select value
 	// sega bassfishing	- first viewport in priority 1 sets scroll value. The rest all contain the wrong value + a higher select value ..
 	// spikeout final	- 2nd viewport in the priority layer has scroll values set, none of the others do. It also uses the highest select value
 
-	float rgba[4];
+	// I think the basic logic is this: the real3d picks the highest scroll fog value, starting from the lowest priority layer. 
+	// If it finds a value for priority layer 0 for example, it then bails out looking for any more.
+	// Fogging seems to be constrained to whatever the viewport is that is set.
+	// Scroll fog needs a density or start value to work, but these can come from another viewport if the fog colour is the same
 
-	for (int i = 0; i < 4; i++) {
+	// For fullscreen viewports I am fairly certain the fogging aspect is drawn at the mixer level, not directly to the frame buffer, otherwise alpha can't work correctly.
+	// For spotlight on fog, I think it must be drawn with the 3d h/w. Think only ECA uses this, maybe ocean hunter
+
+	Node* nodePtr = nullptr;
+
+	for (int i = 0; i < 4 && !nodePtr; i++) {
 		for (auto &n : m_nodes) {
 			if (n.viewport.priority == i) {
-				if (n.viewport.scrollFog != 0.f) {
-					rgba[0] = n.viewport.fogParams[0];
-					rgba[1] = n.viewport.fogParams[1];
-					rgba[2] = n.viewport.fogParams[2];
-					rgba[3] = n.viewport.scrollFog;
-					goto CheckScroll;
+				if (n.viewport.scrollFog > 0.f) {
+
+					// check to see if we have a higher scroll fog value
+					if (nodePtr) {
+						if (nodePtr->viewport.scrollFog < n.viewport.scrollFog) {
+							nodePtr = &n;
+						}
+
+						continue;
+					}
+
+					nodePtr = &n;
 				}
 			}
 		}
 	}
 
-	return;
+	if (nodePtr) {
 
-CheckScroll:
+		// iterate nodes to see if any viewports with that fog colour actually set a fog density, start or spotlight on fog
+		// if all of these are zero fogging is effectively disabled
 
-	for (int i = 0; i < 4; i++) {
-		for (auto &n : m_nodes) {
-			if (n.viewport.priority == i) {
+		for (auto& n : m_nodes) {
 
-				//if we have a fog density value
-				if (n.viewport.fogParams[3] != 0.f) {
+			if (nodePtr->viewport.fogColour[0] == n.viewport.fogColour[0] &&
+				nodePtr->viewport.fogColour[1] == n.viewport.fogColour[1] &&
+				nodePtr->viewport.fogColour[2] == n.viewport.fogColour[2])
+			{
 
-					if (rgba[0] == n.viewport.fogParams[0] &&
-						rgba[1] == n.viewport.fogParams[1] &&
-						rgba[2] == n.viewport.fogParams[2]) {
-
-						glViewport(n.viewport.x, n.viewport.y, n.viewport.width, n.viewport.height);
-						if (m_r3dScrollFog) {
-							m_r3dScrollFog->DrawScrollFog(rgba, n.viewport.scrollAtt, n.viewport.fogParams[6], n.viewport.spotFogColor, n.viewport.spotEllipse);
-						}
-						return;
+				// spotlight on fog is disabled if colour = black
+				bool spotOnFogEnabled = false;
+				for (auto c : n.viewport.spotFogColor) {
+					if (c > 0.0f) {
+						spotOnFogEnabled = true;
+						break;
 					}
 				}
 
+				bool fog			= n.viewport.fogDensity > 0.0f || n.viewport.fogStart > 0.0f || n.viewport.scrollAtt > 0.0f;
+				bool spotlightFog	= n.viewport.fogAttenuation > 0.0f && spotOnFogEnabled;
+
+				if (fog || spotlightFog) {
+
+					auto& vp = nodePtr->viewport;
+					float rgba[4];
+					
+					rgba[0] = vp.fogColour[0];
+					rgba[1] = vp.fogColour[1];
+					rgba[2] = vp.fogColour[2];
+					rgba[3] = vp.scrollFog;
+
+					float fogAttentuation = (fog && spotlightFog) ? 0.0f : n.viewport.fogAttenuation;	// if regular fog is enabled h/w seems to only apply this and skip the spotlight on fog (ECA)
+
+					glViewport(vp.x, vp.y, vp.width, vp.height);
+
+					m_r3dScrollFog.DrawScrollFog(rgba, fogAttentuation, n.viewport.fogAmbient, n.viewport.spotFogColor, n.viewport.spotEllipse);
+					break;
+				}
 			}
 		}
+	}
+}
+
+void CNew3D::DrawAmbientFog()
+{
+	// logic here is still not totally understood
+	// some games are setting fog ambient which seems to darken the 2d background layer too when scroll fogging is not set
+	// The logic is something like tileGenColour * fogAmbient
+	// If fogAmbient = 1.0 it's a no-op. Lower values darken the image
+	// Does this work with scroll fog? Well technically scroll fog already takes into account the fog ambient as it darkens the fog colour
+	// Like scroll fog I am sure this works at the mixer level, rather than drawing into the frame buffer.
+
+	// lemans24 every viewport will set ambient fog, scroll attentuation is sometimes set (for every viewport) for explosion effects from car exhaust. So has no effect on ambient fog
+	// otherwise we'll make the ambient fog flash 
+	// sega rally will set ambient fog to zero for every viewport in priority layers 1-3 with a fog density set. Disabled viewports with priority zero have ambient fog disabled (1.0). Don't think srally uses ambient fog
+	// vf3 almost all viewports in all priority layers have ambient fog set (<1.0)
+	// lost world is setting an ambient fog value every every viewport but has no density or fog start value set. Don't think lost world is using ambient fog
+
+	// Let's pick the lowest fog ambient value from only the first priority layer
+	// Check for fog density or a fog start value, otherwise the effect seems to be disabled (lost world)
+
+	float fogAmbient = 1.0f;
+	Node* nodePtr = nullptr;
+
+	for (int i = 0; i < 4; i++) {
+
+		bool hasPriority = false;
+
+		for (auto& n : m_nodes) {
+
+			auto& vp = n.viewport;
+
+			if (vp.priority == i) {
+
+				hasPriority = true;
+				
+				if (vp.scrollFog > 0.0f) {
+					continue;
+				}
+
+				// if we don't have a fog density or fog start skip this viewport
+				if (vp.fogDensity <= 0.0f && vp.fogStart <= 0.0f) {
+					continue;
+				}
+
+				if (vp.fogAmbient < fogAmbient) {
+					nodePtr = &n;
+					fogAmbient = vp.fogAmbient;
+				}
+			}
+		}
+
+		if (nodePtr || hasPriority) {
+			break;
+		}
+
+	}
+
+	if (nodePtr) {
+		auto& vp = nodePtr->viewport;
+		float rgba[] = { 0.0f, 0.0f, 0.0f, 1.0f - fogAmbient };
+		glViewport(vp.x, vp.y, vp.width, vp.height);
+		m_r3dScrollFog.DrawScrollFog(rgba, 0.0f, 1.0f, vp.spotFogColor, vp.spotEllipse); // we assume spot light is not used
 	}
 }
 
 bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer)
 {
+	glActiveTexture(GL_TEXTURE0);
+	m_textureBank[0].Bind();
+	glActiveTexture(GL_TEXTURE1);
+	m_textureBank[1].Bind();
+	glActiveTexture(GL_TEXTURE0);
+
 	bool hasOverlay = false;		// (high priority polys)
 
-	for (auto &n : m_nodes) {
+	for (auto& n : m_nodes) {
 
 		if (n.viewport.priority != priority || n.models.empty()) {
 			continue;
 		}
 
-		std::shared_ptr<Texture> tex1;
-
-		CalcViewport(&n.viewport, std::abs(m_nfPairs[priority].zNear*0.96f), std::abs(m_nfPairs[priority].zFar*1.05f));	// make planes 5% bigger
+		CalcViewport(&n.viewport);
 		glViewport(n.viewport.x, n.viewport.y, n.viewport.width, n.viewport.height);
 
 		m_r3dShader.SetViewportUniforms(&n.viewport);
 
-		for (auto &m : n.models) {
+		// PRO-1000: layered polygons (decals) go after all non-layered geometry in the viewport, so they are
+		// tested against the surface they sit on
+		for (int layeredPass = 0; layeredPass < 2; layeredPass++) {
 
-			bool matrixLoaded = false;
+			for (auto& m : n.models) {
 
-			if (m.meshes->empty()) {
-				continue;
-			}
+				bool matrixLoaded = false;
 
-			for (auto &mesh : *m.meshes) {
-
-				if (mesh.highPriority) {
-					hasOverlay = true;
+				if (m.meshes->empty()) {
+					continue;
 				}
 
-				if (!mesh.Render(layer)) continue;
-				if (mesh.highPriority != renderOverlay) continue;
+				for (auto& mesh : *m.meshes) {
 
-				if (!matrixLoaded) {
-					m_r3dShader.SetModelStates(&m);
-					matrixLoaded = true;		// do this here to stop loading matrices we don't need. Ie when rendering non transparent etc
+					if (mesh.highPriority) {
+						hasOverlay = true;
+					}
+
+					if (mesh.layered != (layeredPass == 1)) continue;
+					if (!mesh.Render(layer, m.alpha))		continue;
+					if (mesh.highPriority != renderOverlay) continue;
+
+					if (!matrixLoaded) {
+						m_r3dShader.SetModelStates(&m);
+						matrixLoaded = true;		// do this here to stop loading matrices we don't need. Ie when rendering non transparent etc
+					}
+
+					m_r3dShader.SetMeshUniforms(&mesh);
+					glDrawArrays(m_primType, mesh.vboOffset, mesh.vertexCount);
 				}
-				
-				if (mesh.textured) {
-
-					int x, y;
-					CalcTexOffset(m.textureOffsetX, m.textureOffsetY, m.page, mesh.x, mesh.y, x, y);
-
-					if (tex1 && tex1->Compare(x, y, mesh.width, mesh.height, mesh.format)) {
-						// texture already bound
-					}
-					else {
-						tex1 = m_texSheet.BindTexture(m_textureRAM, mesh.format, x, y, mesh.width, mesh.height);
-						if (tex1) {
-							tex1->BindTexture();
-						}
-					}
-
-					if (mesh.microTexture) {
-
-						int mX, mY;
-						glActiveTexture(GL_TEXTURE1);
-						m_texSheet.GetMicrotexPos(y / 1024, mesh.microTextureID, mX, mY);
-						auto tex2 = m_texSheet.BindTexture(m_textureRAM, 0, mX, mY, 128, 128);
-						if (tex2) {
-							tex2->BindTexture();
-						}
-						glActiveTexture(GL_TEXTURE0);
-					}
-				}
-				
-				m_r3dShader.SetMeshUniforms(&mesh);
-				glDrawArrays(m_primType, mesh.vboOffset, mesh.vertexCount);
 			}
 		}
 	}
@@ -291,201 +432,38 @@ bool CNew3D::SkipLayer(int layer)
 	return true;
 }
 
-namespace {
-struct FVertexOffsets
-{
-	std::size_t pos;
-	std::size_t normal;
-	std::size_t texcoords;
-	std::size_t fixedShade;
-	std::size_t faceColour;
-	std::size_t faceNormal;
-};
-
-static void* VboOffset(std::size_t offset)
-{
-	return reinterpret_cast<void*>(static_cast<std::uintptr_t>(offset));
-}
-
-static const FVertexOffsets& GetFVertexOffsets()
-{
-	static const FVertexOffsets offsets = [] {
-		FVertex v {};
-		const auto* base = reinterpret_cast<const unsigned char*>(&v);
-		return FVertexOffsets {
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(v.pos) - base),
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(v.normal) - base),
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(v.texcoords) - base),
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(&v.fixedShade) - base),
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(v.faceColour) - base),
-			static_cast<std::size_t>(reinterpret_cast<const unsigned char*>(v.faceNormal) - base),
-		};
-	}();
-	return offsets;
-}
-} // namespace
-
 void CNew3D::SetRenderStates()
 {
 	m_vbo.Bind(true);
+	glBindVertexArray(m_vao);
+
 	m_r3dShader.SetShader(true);
 
-	glEnableVertexAttribArray(0);
-	glEnableVertexAttribArray(1);
-	glEnableVertexAttribArray(2);
-	glEnableVertexAttribArray(3);
-	glEnableVertexAttribArray(4);
-	glEnableVertexAttribArray(5);
-
-	// before draw, specify vertex and index arrays with their offsets, offsetof is maybe evil ..
-	const auto& offsets = GetFVertexOffsets();
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inVertex"), 4, GL_FLOAT, GL_FALSE, sizeof(FVertex), VboOffset(offsets.pos));
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inNormal"), 3, GL_FLOAT, GL_FALSE, sizeof(FVertex), VboOffset(offsets.normal));
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inTexCoord"), 2, GL_FLOAT, GL_FALSE, sizeof(FVertex), VboOffset(offsets.texcoords));
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inColour"), 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(FVertex), VboOffset(offsets.faceColour));
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inFaceNormal"), 3, GL_FLOAT, GL_FALSE, sizeof(FVertex), VboOffset(offsets.faceNormal));
-	glVertexAttribPointer(m_r3dShader.GetVertexAttribPos("inFixedShade"), 1, GL_FLOAT, GL_FALSE, sizeof(FVertex), VboOffset(offsets.fixedShade));
-
-	glDepthFunc		(GL_LEQUAL);
+	glDepthFunc		(GL_GEQUAL);
 	glEnable		(GL_DEPTH_TEST);
 	glDepthMask		(GL_TRUE);
 	glActiveTexture	(GL_TEXTURE0);
 	glDisable		(GL_CULL_FACE);					// we'll emulate this in the shader		
-	glDisable		(GL_BLEND);
 
-	glStencilFunc	(GL_EQUAL, 0, 0xFF);			// basically stencil test passes if the value is zero
-	glStencilOp		(GL_KEEP, GL_INCR, GL_INCR);	// if the stencil test passes, we increment the value
+	glEnable		(GL_STENCIL_TEST);
 	glStencilMask	(0xFF);
+
+	glBlendFunc		(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glDisable		(GL_BLEND);
 }
 
 void CNew3D::DisableRenderStates()
 {
 	m_vbo.Bind(false);
+	glBindVertexArray(0);
+
 	m_r3dShader.SetShader(false);
 
 	glDisable(GL_STENCIL_TEST);
-
-	glDisableVertexAttribArray(0);
-	glDisableVertexAttribArray(1);
-	glDisableVertexAttribArray(2);
-	glDisableVertexAttribArray(3);
-	glDisableVertexAttribArray(4);
-	glDisableVertexAttribArray(5);
 }
 
 void CNew3D::RenderFrame(void)
 {
-#ifdef __ANDROID__
-	if (!m_new3dAccurate) {
-		// Android/GLES: basic mesh path (no multi-pass transparency compositing yet).
-		for (int i = 0; i < 4; i++) {
-		m_nfPairs[i].zNear = -std::numeric_limits<float>::max();
-		m_nfPairs[i].zFar  =  std::numeric_limits<float>::max();
-	}
-
-	{
-		std::lock_guard<std::mutex> guard(m_losMutex);
-		std::swap(m_losBack, m_losFront);
-		for (int i = 0; i < 4; i++) {
-			m_losBack->value[i] = 0;
-		}
-	}
-
-	m_polyBufferRam.clear();
-	m_nodes.clear();
-	m_modelMat.Release();
-	m_nodeAttribs.Reset();
-
-	RenderViewport(0x800000);
-
-	m_vbo.Bind(true);
-#ifdef __ANDROID__
-	const bool clampRamVerts = m_config["AndroidClampRamVerts"].ValueAsDefault<bool>(true);
-	if (clampRamVerts && m_polyBufferRam.size() > MAX_RAM_VERTS) {
-		if (!m_warnedRamOverflow) {
-			ErrorLog("New3D: RAM vertex buffer overflow (size=%zu, max=%d). Clamping.", m_polyBufferRam.size(), MAX_RAM_VERTS);
-			m_warnedRamOverflow = true;
-		}
-		m_polyBufferRam.resize(MAX_RAM_VERTS);
-	}
-#endif
-	m_vbo.BufferSubData(MAX_ROM_VERTS*sizeof(FVertex), m_polyBufferRam.size()*sizeof(FVertex), m_polyBufferRam.data());
-
-	if (!m_polyBufferRom.empty()) {
-		int romBytes	= (int)m_polyBufferRom.size() * sizeof(FVertex);
-		int vboBytes	= m_vbo.GetSize();
-		int size		= romBytes - vboBytes;
-
-		if (size) {
-			if (m_polyBufferRom.size() >= MAX_ROM_VERTS) {
-				m_polyBufferRom.clear();
-				m_romMap.clear();
-				m_vbo.Reset();
-			}
-			else {
-				m_vbo.AppendData(size, &m_polyBufferRom[vboBytes / sizeof(FVertex)]);
-			}
-		}
-	}
-
- 	// Draw to default framebuffer.
- 	glDisable(GL_STENCIL_TEST);
-	// Android compositor draws TileGen bottom surface first; keep color, clear depth for 3D.
-	glClear(GL_DEPTH_BUFFER_BIT);
-
-	for (int pri = 0; pri <= 3; pri++) {
-		if (SkipLayer(pri)) continue;
-
-		// Reset depth per priority so layer ordering matches the hardware behavior.
-		glClear(GL_DEPTH_BUFFER_BIT);
-
-		// Opaque pass (non-overlay).
-		SetRenderStates();
-		m_r3dShader.DiscardAlpha(true);
-		glDisable(GL_BLEND);
-		RenderScene(pri, false, Layer::colour);
-		DisableRenderStates();
-
-		// Translucent pass (rough): non-overlay with blending.
-		SetRenderStates();
-		m_r3dShader.DiscardAlpha(false);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glDepthMask(GL_FALSE);
-		RenderScene(pri, false, Layer::trans1);
-		RenderScene(pri, false, Layer::trans2);
-		glDepthMask(GL_TRUE);
-		DisableRenderStates();
-
-		// Clear depth so high-priority polys are not occluded by lower-priority geometry.
-		glClear(GL_DEPTH_BUFFER_BIT);
-
-		// Opaque pass (overlay).
-		SetRenderStates();
-		m_r3dShader.DiscardAlpha(true);
-		glDisable(GL_BLEND);
-		RenderScene(pri, true, Layer::colour);
-		DisableRenderStates();
-
-		// Translucent pass (overlay).
-		SetRenderStates();
-		m_r3dShader.DiscardAlpha(false);
-		glEnable(GL_BLEND);
-		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-		glDepthMask(GL_FALSE);
-		RenderScene(pri, true, Layer::trans1);
-		RenderScene(pri, true, Layer::trans2);
-		glDepthMask(GL_TRUE);
-		DisableRenderStates();
-	}
-		return;
-	}
-#endif
-	for (int i = 0; i < 4; i++) {
-		m_nfPairs[i].zNear = -std::numeric_limits<float>::max();
-		m_nfPairs[i].zFar  =  std::numeric_limits<float>::max();
-	}
-
 	{
 		std::lock_guard<std::mutex> guard(m_losMutex);
 		std::swap(m_losBack, m_losFront);
@@ -500,34 +478,38 @@ void CNew3D::RenderFrame(void)
 	m_modelMat.Release();			// would hope we wouldn't need this but no harm in checking
 	m_nodeAttribs.Reset();
 
+	if (m_blockCulling && !m_noWhiteFlash)		// block culling disables 3D rendering
+	{
+		if (m_aaTarget) {
+			glBindFramebuffer(GL_FRAMEBUFFER, m_aaTarget);		// if we have an AA target draw to it instead of the default back buffer
+		}
+
+		// clear screen to white
+		glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		
+		if (m_aaTarget) {
+			glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		}
+
+		return;
+	}
+
 	RenderViewport(0x800000);						// build model structure
-	DrawScrollFog();								// fog layer if applicable must be drawn here
 	
 	m_vbo.Bind(true);
-#ifdef __ANDROID__
-	{
-		const bool clampRamVerts = m_config["AndroidClampRamVerts"].ValueAsDefault<bool>(true);
-		if (clampRamVerts && m_polyBufferRam.size() > MAX_RAM_VERTS) {
-			if (!m_warnedRamOverflow) {
-				ErrorLog("New3D: RAM vertex buffer overflow (size=%zu, max=%d). Clamping.", m_polyBufferRam.size(), MAX_RAM_VERTS);
-				m_warnedRamOverflow = true;
-			}
-			m_polyBufferRam.resize(MAX_RAM_VERTS);
-		}
-	}
-#endif
 	m_vbo.BufferSubData(MAX_ROM_VERTS*sizeof(FVertex), m_polyBufferRam.size()*sizeof(FVertex), m_polyBufferRam.data());	// upload all the dynamic data to GPU in one go
 
 	if (!m_polyBufferRom.empty()) {
 
 		// sync rom memory with vbo
-		int romBytes	= (int)m_polyBufferRom.size() * sizeof(FVertex);
+		int romBytes	= (int)(m_polyBufferRom.size() * sizeof(FVertex));
 		int vboBytes	= m_vbo.GetSize();
 		int size		= romBytes - vboBytes;
 
 		if (size) {
 			//check we haven't blown up the memory buffers
-			//we will lose rom models for 1 frame is this happens, not the end of the world, as probably won't ever happen anyway
+			//we will lose rom models for 1 frame if this happens, not the end of the world, as probably won't ever happen anyway
 			if (m_polyBufferRom.size() >= MAX_ROM_VERTS) {
 				m_polyBufferRom.clear();
 				m_romMap.clear();
@@ -539,9 +521,11 @@ void CNew3D::RenderFrame(void)
 		}
 	}
 
-	if (!m_r3dFrameBuffers) return;
-	m_r3dFrameBuffers->SetFBO(Layer::trans12);
-	glClear(GL_COLOR_BUFFER_BIT);					// wipe both trans layers
+	m_r3dFrameBuffers.SetFBO(Layer::colour);		// colour will draw to all 3 buffers. For regular opaque pixels the transparent layers will be essentially masked
+	glClear(GL_COLOR_BUFFER_BIT);
+
+	DrawAmbientFog();
+	DrawScrollFog();								// fog layer if applicable must be drawn here
 
 	for (int pri = 0; pri <= 3; pri++) {
 
@@ -551,43 +535,52 @@ void CNew3D::RenderFrame(void)
 
 			bool renderOverlay = (i == 1);
 
-			m_r3dFrameBuffers->SetFBO(Layer::colour);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
-
 			SetRenderStates();
 
-			m_r3dShader.DiscardAlpha(true);						// discard all translucent pixels in opaque pass
+			m_r3dFrameBuffers.SetFBO(Layer::colour);
+
+			glClearDepth(0.0);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+			m_r3dShader.DiscardAlpha(true);
+			m_r3dShader.SetLayer(Layer::colour);
 			bool hasOverlay = RenderScene(pri, renderOverlay, Layer::colour);
+
+			glDepthFunc(GL_GREATER);
+
+			m_r3dShader.DiscardAlpha(false);
+
+			m_r3dFrameBuffers.StoreDepth();
+			m_r3dShader.SetLayer(Layer::trans1);
+			m_r3dFrameBuffers.SetFBO(Layer::trans1);
+			RenderScene(pri, renderOverlay, Layer::trans1);
+
+			m_r3dFrameBuffers.RestoreDepth();
+			m_r3dShader.SetLayer(Layer::trans2);
+			m_r3dFrameBuffers.SetFBO(Layer::trans2);
+			RenderScene(pri, renderOverlay, Layer::trans2);
 
 			if (!renderOverlay) {
 				ProcessLos(pri);
 			}
-
-			DisableRenderStates();
-
-			m_r3dFrameBuffers->DrawOverTransLayers();			// mask trans layer with opaque pixels
-			m_r3dFrameBuffers->CompositeBaseLayer();				// copy opaque pixels to back buffer
-
-			SetRenderStates();
-
-			glDepthFunc(GL_LESS);								// alpha polys seem to use gl_less (ocean hunter)
-
-			m_r3dShader.DiscardAlpha		(false);			// render only translucent pixels
-			m_r3dFrameBuffers->StoreDepth	();					// save depth buffer for 1st trans pass
-			m_r3dFrameBuffers->SetFBO		(Layer::trans1);
-			RenderScene						(pri, renderOverlay, Layer::trans1);
-
-			m_r3dFrameBuffers->RestoreDepth	();					// restore depth buffer, trans layers don't seem to depth test against each other
-			m_r3dFrameBuffers->SetFBO		(Layer::trans2);
-			RenderScene						(pri, renderOverlay, Layer::trans2);
-
+						
 			DisableRenderStates();
 
 			if (!hasOverlay) break;								// no high priority polys						
 		}
 	}
 
-	m_r3dFrameBuffers->CompositeAlphaLayer();
+	m_r3dFrameBuffers.SetFBO(Layer::none);
+
+	if (m_aaTarget) {
+		glBindFramebuffer(GL_FRAMEBUFFER, m_aaTarget);			// if we have an AA target draw to it instead of the default back buffer
+	}
+
+	m_r3dFrameBuffers.Draw();
+
+	if (m_aaTarget) {
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	}
 }
 
 void CNew3D::BeginFrame(void)
@@ -616,7 +609,7 @@ const UINT32* CNew3D::TranslateCullingAddress(UINT32 addr)
 		return &m_cullingRAMLo[addr];
 	}
 
-	return NULL;
+	return nullptr;
 }
 
 // Translates model references
@@ -632,19 +625,26 @@ const UINT32* CNew3D::TranslateModelAddress(UINT32 modelAddr)
 	}
 }
 
+const UINT32* CNew3D::ModelMemoryEnd(const UINT32* data) const
+{
+	if (data >= m_vrom && data < m_vrom + 0x1000000) {
+		return m_vrom + 0x1000000;			// VROM buffer: 64 MB (PRO-1000: the whole 64 MB polygon memory)
+	}
+
+	return m_polyRAM + 0x100000;			// polygon RAM: 1M words
+}
+
 bool CNew3D::DrawModel(UINT32 modelAddr)
 {
-	const UINT32*	modelAddress;
-	bool			cached = false;
-	Model*			m;
+	bool cached = false;
 
-	modelAddress = TranslateModelAddress(modelAddr);
+	const UINT32* const modelAddress = TranslateModelAddress(modelAddr);
 
 	// create a new model to push onto the vector
 	m_nodes.back().models.emplace_back();
 
 	// get the last model in the array
-	m = &m_nodes.back().models.back();
+	Model* const m = &m_nodes.back().models.back();
 
 	if (IsVROMModel(modelAddr) && !IsDynamicModel((UINT32*)modelAddress)) {
 
@@ -672,67 +672,94 @@ bool CNew3D::DrawModel(UINT32 modelAddr)
 	}
 
 	// update texture offsets
-	m->textureOffsetX = m_nodeAttribs.currentTexOffsetX;
-	m->textureOffsetY = m_nodeAttribs.currentTexOffsetY;
-	m->page = m_nodeAttribs.currentPage;
-	m->scale = m_nodeAttribs.currentModelScale;
+	m->textureOffsetX	= m_nodeAttribs.currentTexOffsetX;
+	m->textureOffsetY	= m_nodeAttribs.currentTexOffsetY;
+	m->page				= m_nodeAttribs.currentPage;
+	m->scale			= m_nodeAttribs.currentModelScale;
+	m->alpha			= m_nodeAttribs.currentModelAlpha;
 
 	if (!cached) {
 		CacheModel(m, modelAddress);
 	}
 
-	if (m_nodeAttribs.currentClipStatus != Clip::INSIDE) {
-		ClipModel(m);	// not storing clipped values, only working out the Z range
-	}
-
 	return true;
 }
 
-// Descends into a 10-word culling node
+/*
+	0x00:   x------- -------- -------- --------	Is UF ref
+			-x------ -------- -------- --------	Is 3D model
+			--x----- -------- -------- --------	Is point
+			---x---- -------- -------- --------	Is point ref
+			----x--- -------- -------- --------	Is animation
+			-----x-- -------- -------- --------	Is billboard
+			------x- -------- -------- --------	Child is billboard
+			-------x -------- -------- --------	Extra child pointer needed
+			-------- xxxxx--- -------- --------	Spare (unknown if used)
+			-------- -----xxx xxxxxx-- --------	Node ID
+			-------- -------- ------x- --------	Discard 1
+			-------- -------- -------x --------	Discard 2
+
+			-------- -------- -------- x-------	Reset matrix
+			-------- -------- -------- -x------	Use child pointer
+			-------- -------- -------- --x-----	Use sibling pointer
+			-------- -------- -------- ---x----	No matrix
+			-------- -------- -------- ----x---	Indirect child
+			-------- -------- -------- -----x--	Valid color table
+			-------- -------- -------- ------xx	Node type(0 = viewport, 1 = root node, 2 = culling node)
+
+	0x01, 0x02 only present on Step 1.5+
+
+	0x01:   xxxxxxxx xxxxxxxx xxxxxxxx xxxxxx--	Model scale (float32) last 2 bits are control words
+			-------- -------- -------- ------x- Disable culling
+			-------- -------- -------- -------x	Valid model scale
+
+	0x02 :	-------- -------- x------- --------	Texture replace
+			-------- -------- -x------ --------	Switch bank
+			-------- -------- --xxxxxx x-------	X offset
+			-------- -------- -------- -xxxxxxx	Y offset
+
+	0x03 :	xxxxxxxx xxxxx--- -------- --------	Color table address 1
+			-------- -----xxx xxxx---- --------	LOD table pointer
+			-------- -------- ----xxxx xxxxxxxx	Node matrix
+
+	0x04:   Translation X coordinate
+	0x05:   Translation Y coordinate
+	0x06:   Translation Z coordinate
+
+	0x07:   xxxx---- -------- -------- -------- Color table address 2
+			-----x-- -------- -------- -------- Sibling table
+			------x- -------- -------- -------- Point
+			-------x -------- -------- -------- Leaf node
+			-------- xxxxxxxx xxxxxxxx xxxxxxxx Child pointer
+
+	0x08:   xxxxxxx- -------- -------- -------- Color table address 3
+			-------x -------- -------- -------- Null sibling
+			-------- xxxxxxxx xxxxxxxx xxxxxxxx Sibling pointer
+
+	0x09:   xxxxxxxx xxxxxxxx -------- -------- Blend radius
+			-------- -------- xxxxxxxx xxxxxxxx Culling radius
+*/
+
 void CNew3D::DescendCullingNode(UINT32 addr)
 {
 	enum class NodeType { undefined = -1, viewport = 0, rootNode = 1, cullingNode = 2 };
 
-	const UINT32	*node, *lodTable;
+	const UINT32	*node, *lodPtr;
 	UINT32			matrixOffset, child1Ptr, sibling2Ptr;
-	BBox			bbox;
 	UINT16			uCullRadius;
 	float			fCullRadius;
 	UINT16			uBlendRadius;
-	//float			fBlendRadius;
-	//UINT8			lodTablePointer;
+	float			fBlendRadius;
+	UINT8			lodTablePointer;
 	NodeType		nodeType;
+	bool			resetMatrix;
 
 	if (m_nodeAttribs.StackLimit()) {
 		return;
 	}
 
-	const UINT32 nodeAddr = addr & 0x00FFFFFF;
-
-	struct CullingStackGuard
-	{
-		CNew3D &owner;
-		UINT32 addr;
-		bool active;
-		CullingStackGuard(CNew3D &owner, UINT32 addr)
-			: owner(owner), addr(addr), active(owner.m_cullingStack.insert(addr).second)
-		{
-		}
-		~CullingStackGuard()
-		{
-			if (active) {
-				owner.m_cullingStack.erase(addr);
-			}
-		}
-	} guard(*this, nodeAddr);
-
-	if (!guard.active) {
-		return;
-	}
-
-	node = TranslateCullingAddress(nodeAddr);
-
-	if (NULL == node) {
+	node = TranslateCullingAddress(addr);
+	if (nullptr == node) {
 		return;
 	}
 
@@ -741,35 +768,54 @@ void CNew3D::DescendCullingNode(UINT32 addr)
 	child1Ptr		= node[0x07 - m_offset] & 0x7FFFFFF;	// mask colour table bits
 	sibling2Ptr		= node[0x08 - m_offset] & 0x1FFFFFF;	// mask colour table bits
 	matrixOffset	= node[0x03 - m_offset] & 0xFFF;
-	//lodTablePointer = (node[0x03 - m_offset] >> 12) & 0x7F;
+	resetMatrix		= (node[0x0] & 0x80) > 0;
+	lodTablePointer = (node[0x03 - m_offset] >> 12) & 0x7F;
 
 	// check our node type
 	if (nodeType == NodeType::viewport) {
 		return;												// viewport nodes aren't rendered
 	}
 
+	// node discard
+	if ((0x300 & node[0]) == 0x300) {						// This allows to set node transparency. If both bits are set object is completely invisible.
+		return;
+	}
+
 	// parse siblings 
-	if ((node[0x00] & 0x07) != 0x06) {						// colour table seems to indicate no siblings
+	// A culling node with a valid colour table (node[0] & 7 == 6) ignores its sibling word unless it is a
+	// point ref (bit 28). Model 3 Step 2.x games leave junk there: self references, back links to earlier
+	// slots and stale links from reused root nodes (Harley, Ski Champ, ECA, Ocean Hunter; following them
+	// loops or draws objects twice). PRO-1000 point light chains (w0 = 10000016) link through it.
+	// Tested: VF3, Scud, Lost World, Le Mans 24, Sega Rally 2, Harley, Ski Champ, Spikeout, ECA, Ocean Hunter
+	// (no colour-table node with bit 28 set), and every PRO-1000 demo (all 82 such nodes are point refs).
+	const bool colourTableNode = (node[0x00] & 0x07) == 0x06;
+	const bool pointRef = (node[0x00] & 0x10000000) != 0;
+
+	if (!colourTableNode || pointRef) {
 		if (!(sibling2Ptr & 0x1000000) && sibling2Ptr) {
 			DescendCullingNode(sibling2Ptr);				// no need to mask bit, would already be zero
 		}
 	}
-
+	
 	if ((node[0x00] & 0x04)) {
 		m_colorTableAddr = ((node[0x03 - m_offset] >> 19) << 0) | ((node[0x07 - m_offset] >> 28) << 13) | ((node[0x08 - m_offset] >> 25) << 17);
-		m_colorTableAddr &= 0x000FFFFF; // clamp to 4MB (in words) range
+		if (m_vromIsPolygonRAM) {
+			m_colorTableAddr &= 0x00FFFFFF;	// all 24 bits: the table can be anywhere in polygon RAM
+		}
+		else {
+			m_colorTableAddr &= 0x000FFFFF;	// clamp to 4MB (in words) range
+		}
 	}
 
-	if (!m_nodeAttribs.Push()) {	// save current attribs
-		return;
-	}
+	m_nodeAttribs.Push();	// save current attribs
 
 	if (!m_offset) {		// Step 1.5+
 
-		float modelScale = Util::Uint32AsFloat(node[1]);
-		if (modelScale > std::numeric_limits<float>::min()) {
-			m_nodeAttribs.currentModelScale = modelScale;
-		}
+		if (node[0x01] & 1)
+			m_nodeAttribs.currentModelScale = Util::Uint32AsFloat(node[0x01] & ~3);	// mask out control bits
+
+		if (node[0x01] & 2)
+			m_nodeAttribs.currentDisableCulling = true;
 
 		// apply texture offsets, else retain current ones
 		if ((node[0x02] & 0x8000))	{
@@ -786,57 +832,100 @@ void CNew3D::DescendCullingNode(UINT32 addr)
 
 	// apply translation vector
 	if (node[0x00] & 0x10) {
-		float x = Util::Uint32AsFloat(node[0x04 - m_offset]);
-		float y = Util::Uint32AsFloat(node[0x05 - m_offset]);
-		float z = Util::Uint32AsFloat(node[0x06 - m_offset]);
-		m_modelMat.Translate(x, y, z);
+		float centroid_x = Util::Uint32AsFloat(node[0x04 - m_offset]);
+		float centroid_y = Util::Uint32AsFloat(node[0x05 - m_offset]);
+		float centroid_z = Util::Uint32AsFloat(node[0x06 - m_offset]);
+		m_modelMat.Translate(centroid_x, centroid_y, centroid_z);
 	}
 	// multiply matrix, if specified
 	else if (matrixOffset) {
 		MultMatrix(matrixOffset,m_modelMat);
 	}
 
-	uCullRadius = node[9 - m_offset] & 0xFFFF;
-	fCullRadius = R3DFloat::GetFloat16(uCullRadius);
-
-	uBlendRadius = node[9 - m_offset] >> 16;
-	//fBlendRadius = R3DFloat::GetFloat16(uBlendRadius);
-
-	if (m_nodeAttribs.currentClipStatus != Clip::INSIDE) {
-
-		if (uCullRadius != R3DFloat::Pro16BitMax) {
-
-			CalcBox(fCullRadius, bbox);
-			TransformBox(m_modelMat, bbox);
-
-			m_nodeAttribs.currentClipStatus = ClipBox(bbox, m_planes);
-
-			if (m_nodeAttribs.currentClipStatus == Clip::INSIDE) {
-				CalcBoxExtents(bbox);
-			}
-		}
-		else {
-			m_nodeAttribs.currentClipStatus = Clip::NOT_SET;
-		}
+	if (resetMatrix) {
+		ResetMatrix(m_modelMat);
 	}
 
-	if (m_nodeAttribs.currentClipStatus != Clip::OUTSIDE && fCullRadius > R3DFloat::Pro16BitFltMin) {
+	float& x = m_modelMat.currentMatrix[12];
+	float& y = m_modelMat.currentMatrix[13];
+	float& z = m_modelMat.currentMatrix[14];
+
+	uCullRadius = node[9 - m_offset] & 0xFFFF;
+	fCullRadius = R3DFloat::GetFloat16(uCullRadius) * m_nodeAttribs.currentModelScale;;
+
+	uBlendRadius = node[9 - m_offset] >> 16;
+	fBlendRadius = R3DFloat::GetFloat16(uBlendRadius) * m_nodeAttribs.currentModelScale;;
+
+	bool outsideFrustum = false;
+	if ((z * m_planes.bnlu - x * m_planes.bnlv * m_planes.correction) > fCullRadius ||
+		(z * m_planes.bntu + y * m_planes.bntw) > fCullRadius ||
+		(z * m_planes.bnru - x * m_planes.bnrv * m_planes.correction) > fCullRadius ||
+		(z * m_planes.bnbu + y * m_planes.bnbw) > fCullRadius)
+	{
+		outsideFrustum = true;
+	}
+
+	// LOD table pointer 0x7F (all bits set) = no LOD table. The PRO-1000 API uses it for point-light billboards
+	// (reset_matrix nodes); the table it would index is past the configured tables and holds whatever memory follows.
+	const bool noLodTable = (lodTablePointer == 0x7F);
+
+	float LODscale = (m_nodeAttribs.currentDisableCulling || noLodTable) ? std::numeric_limits<float>::max() : (fBlendRadius / std::hypot(x, y, z));
+	const LOD * const lod = m_LODBlendTable->table[lodTablePointer].lod;
+
+	LODscale = std::clamp(LODscale, 0.0f, std::numeric_limits<float>::max());
+
+	if (m_nodeAttribs.currentDisableCulling || (!outsideFrustum && (noLodTable || LODscale >= lod[3].deleteSize))) {
 
 		// Descend down first link
 		if ((node[0x00] & 0x08))	// 4-element LOD table
 		{
-			lodTable = TranslateCullingAddress(child1Ptr);
+			lodPtr = TranslateCullingAddress(child1Ptr);
 
-			if (NULL != lodTable) {
-				if ((node[0x03 - m_offset] & 0x20000000)) {
-					DescendCullingNode(lodTable[0] & 0xFFFFFF);
+			if (nullptr != lodPtr)
+			{
+				int modelLOD;
+				for (modelLOD = 0; modelLOD < 3; modelLOD++)
+				{
+					if (LODscale >= lod[modelLOD].deleteSize && lodPtr[modelLOD] & 0x1000000)
+						break;
+				}
+
+				float tempAlpha = m_nodeAttribs.currentModelAlpha;
+
+				float nodeAlpha = lod[modelLOD].blendFactor * (LODscale - lod[modelLOD].deleteSize);
+				nodeAlpha = std::clamp(nodeAlpha, 0.0f, 1.0f);
+				if (nodeAlpha > (float)(31.0 / 32.0))		// shader discards pixels below 1/32 alpha
+					nodeAlpha = 1.0f;
+				else if (nodeAlpha < (float)(1.0 / 32.0))
+					nodeAlpha = 0.0f;
+				m_nodeAttribs.currentModelAlpha *= nodeAlpha;	// alpha of each node multiples by the alpha of its parent
+				
+				if (!(child1Ptr & 0x01000000)) {
+					DescendCullingNode(lodPtr[modelLOD] & 0xFFFFFF);
+
+					if (nodeAlpha < 1.0f && modelLOD != 3)
+					{
+						m_nodeAttribs.currentModelAlpha = (1.0f - nodeAlpha) * tempAlpha;
+						DescendCullingNode(lodPtr[modelLOD+1] & 0xFFFFFF);
+					}
 				}
 				else {
-					DrawModel(lodTable[0] & 0xFFFFFF);	//TODO
+					DrawModel(lodPtr[modelLOD] & 0xFFFFFF);
+
+					if (nodeAlpha < 1.0f && modelLOD != 3)
+					{
+						m_nodeAttribs.currentModelAlpha = (1.0f - nodeAlpha) * tempAlpha;
+						DrawModel(lodPtr[modelLOD + 1] & 0xFFFFFF);
+					}
 				}
 			}
 		}
 		else {
+
+			float nodeAlpha = noLodTable ? 1.0f : lod[3].blendFactor * (LODscale - lod[3].deleteSize);
+			nodeAlpha = std::clamp(nodeAlpha, 0.0f, 1.0f);
+			m_nodeAttribs.currentModelAlpha *= nodeAlpha;	// alpha of each node multiples by the alpha of its parent
+
 			DescendNodePtr(child1Ptr);
 		}
 
@@ -873,27 +962,18 @@ void CNew3D::DescendNodePtr(UINT32 nodeAddr)
 
 void CNew3D::DescendPointerList(UINT32 addr)
 {
-	const UINT32*	list;
-	UINT32			nodeAddr;
-	int				index;
-
-	list = TranslateCullingAddress(addr);
-
-	if (NULL == list) {
+	const UINT32* const list = TranslateCullingAddress(addr);
+	if (nullptr == list) {
 		return;
 	}
 
-	index = 0;
+	int index = 0;
 
 	while (true) {
 
-		if (list[index] & 0x01000000) {
-			break;	// empty list
+		if (!(list[index] & 0x01000000)) {
+			DescendCullingNode(list[index] & 0x00FFFFFF);
 		}
-
-		nodeAddr = list[index] & 0x00FFFFFF;	// clear upper 8 bits to ensure this is processed as a culling node
-
-		DescendCullingNode(nodeAddr);
 
 		if (list[index] & 0x02000000) {
 			break;	// list end
@@ -902,7 +982,6 @@ void CNew3D::DescendPointerList(UINT32 addr)
 		index++;
 	}
 }
-
 
 /******************************************************************************
 Matrix Stack
@@ -946,6 +1025,32 @@ void CNew3D::MultMatrix(UINT32 matrixOffset, Mat4& mat)
 	mat.MultMatrix(m);
 }
 
+// Multiplies the matrix stack by the inverse of a Real3D matrix (rigid transform: [R^T | -R^T t])
+void CNew3D::MultInverseMatrix(UINT32 matrixOffset, Mat4& mat)
+{
+	if (m_matrixBasePtr == nullptr) {
+		return;
+	}
+
+	const float* src = &m_matrixBasePtr[matrixOffset * 12];		// t = src[0..2], R rows = src[3..5], src[6..8], src[9..11]
+	GLfloat inv[16];
+
+	for (int r = 0; r < 3; r++) {
+		for (int c = 0; c < 3; c++) {
+			inv[c * 4 + r] = src[3 + c * 3 + r];
+		}
+	}
+
+	for (int r = 0; r < 3; r++) {
+		inv[12 + r] = -(src[3 + r] * src[0] + src[6 + r] * src[1] + src[9 + r] * src[2]);
+	}
+
+	inv[3] = inv[7] = inv[11] = 0;
+	inv[15] = 1;
+
+	mat.MultMatrix(inv);
+}
+
 /*
 * InitMatrixStack():
 *
@@ -975,7 +1080,7 @@ void CNew3D::MultMatrix(UINT32 matrixOffset, Mat4& mat)
 * NOTE: This function assumes we are in GL_MODELVIEW matrix mode.
 */
 
-void CNew3D::InitMatrixStack(UINT32 matrixBaseAddr, Mat4& mat)
+void CNew3D::InitMatrixStack(UINT32 matrixBaseAddr, UINT32 envIdx, Mat4& mat)
 {
 	GLfloat m[4 * 4];
 
@@ -988,9 +1093,61 @@ void CNew3D::InitMatrixStack(UINT32 matrixBaseAddr, Mat4& mat)
 
 	mat.LoadMatrix(m);
 
-	// Set matrix base address and apply matrix #0 (coordinate system matrix)
 	m_matrixBasePtr = (float *)TranslateCullingAddress(matrixBaseAddr);
-	MultMatrix(0, mat);
+
+	// The viewport's environment-to-channel matrix (word 0x15, SDK: env_to_chan_matrix_index).
+	// Index 0 (every Model 3 game tested: VF3, Sega Rally 2, Harley, Daytona 2) holds the coordinate-system
+	// matrix and is used directly. Any other index (PRO-1000, allocated downwards from 1023, never 0) holds the
+	// camera pose, eye -> world, and is used inverted.
+	if (envIdx == 0) {
+		MultMatrix(0, mat);
+		SaveCoordSysRot();			// coordinate system = fix-up x matrix 0
+	}
+	else {
+		SaveCoordSysRot();			// coordinate system = Real3D eye axes
+		MultInverseMatrix(envIdx, mat);
+	}
+}
+
+// what this does is to set the rotation back to zero, whilst keeping the position and scale of the current matrix
+void CNew3D::ResetMatrix(Mat4& mat) const
+{
+	float m[16];
+	std::memcpy(m, mat.currentMatrix, 16 * 4);
+
+	// transpose the top 3x3 of the matrix (this effectively inverts the rotation). When we multiply our new matrix it'll effectively cancel out the rotations.
+	std::swap(m[1], m[4]);
+	std::swap(m[2], m[8]);
+	std::swap(m[6], m[9]);
+
+	// set position to zero
+	m[12] = 0;
+	m[13] = 0;
+	m[14] = 0;
+	m[15] = 1;
+
+	// normalise columns, this removes the scaling, otherwise we'll apply it twice
+	float s1 = std::sqrt((m[0] * m[0]) + (m[1] * m[1]) + (m[2] * m[2]));
+	float s2 = std::sqrt((m[4] * m[4]) + (m[5] * m[5]) + (m[6] * m[6]));
+	float s3 = std::sqrt((m[8] * m[8]) + (m[9] * m[9]) + (m[10] * m[10]));
+
+	m[0] /= s1;		m[4] /= s2;		m[8] /= s3;
+	m[1] /= s1;		m[5] /= s2;		m[9] /= s3;
+	m[2] /= s1;		m[6] /= s2;		m[10] /= s3;
+
+	mat.MultMatrix(m);
+
+	// The reset sets the rotation to the viewport's coordinate system, keeping position and scale.
+	mat.MultMatrix(m_coordSysRot);
+}
+
+void CNew3D::SaveCoordSysRot()
+{
+	std::memcpy(m_coordSysRot, m_modelMat.currentMatrix, sizeof(m_coordSysRot));
+	m_coordSysRot[12] = 0.0f;	// not sure if require to remove pos from matrix base, usually never set
+	m_coordSysRot[13] = 0.0f;
+	m_coordSysRot[14] = 0.0f;
+	m_coordSysRot[15] = 1.0f;
 }
 
 // Draws viewports of the given priority
@@ -1013,71 +1170,72 @@ void CNew3D::RenderViewport(UINT32 addr)
 	}
 
 	// Translate address and obtain pointer
-	const uint32_t *vpnode = TranslateCullingAddress(addr);
-
-	if (NULL == vpnode) {
+	const uint32_t * const vpnode = TranslateCullingAddress(addr);
+	if (nullptr == vpnode) {
 		return;
 	}
 
-	if (!(vpnode[0] & 0x20)) {	// only if viewport enabled
+	bool vpDisabled = vpnode[0] & 0x20;						// only if viewport enabled
 
+	{
 		// create node object 
 		m_nodes.emplace_back(Node());
 		m_nodes.back().models.reserve(2048);				// create space for models
 
 		// get pointer to its viewport
-		Viewport *vp = &m_nodes.back().viewport;
+		Viewport* vp = &m_nodes.back().viewport;
 
 		vp->priority	= (vpnode[0] >> 3) & 0x3;
 		vp->select		= (vpnode[0] >> 8) & 0x3;
 		vp->number		= (vpnode[0] >> 10);
-		m_currentPriority = vp->priority;
 
-		// Fetch viewport parameters (TO-DO: would rounding make a difference?)
-		vp->vpX			= (int)(((vpnode[0x1A] & 0xFFFF) * (float)(1.0 / 16.0)) + 0.5f);		// viewport X (12.4 fixed point)
-		vp->vpY			= (int)(((vpnode[0x1A] >> 16) * (float)(1.0 / 16.0)) + 0.5f);			// viewport Y (12.4)
-		vp->vpWidth		= (int)(((vpnode[0x14] & 0xFFFF) * (float)(1.0 / 4.0)) + 0.5f);		// width (14.2)
-		vp->vpHeight	= (int)(((vpnode[0x14] >> 16) * (float)(1.0 / 4.0)) + 0.5f);			// height (14.2)
+		// Fetch viewport parameters
+		vp->vpX			= ((vpnode[0x1A] & 0xFFFF) * (float)(1.0 / 16.0)) ;		// viewport X (12.4 fixed point)
+		vp->vpY			= ((vpnode[0x1A] >> 16) * (float)(1.0 / 16.0));			// viewport Y (12.4)
+		vp->vpWidth		= ((vpnode[0x14] & 0xFFFF) * (float)(1.0 / 4.0));		// width (14.2)
+		vp->vpHeight	= ((vpnode[0x14] >> 16) * (float)(1.0 / 4.0));			// height (14.2)
 
-		uint32_t matrixBase	= vpnode[0x16] & 0xFFFFFF;							// matrix base address
+		uint32_t matrixBase = vpnode[0x16] & 0xFFFFFF;							// matrix base address
 
 		m_LODBlendTable = (LODBlendTable*)TranslateCullingAddress(vpnode[0x17] & 0xFFFFFF);
-
-		/*
-		vp->angle_left		= -atan2f(Util::Uint32AsFloat(vpnode[12]),  Util::Uint32AsFloat(vpnode[13]));	// These values work out as the normals for the clipping planes.
-		vp->angle_right		=  atan2f(Util::Uint32AsFloat(vpnode[16]), -Util::Uint32AsFloat(vpnode[17]));	// Sometimes these values (dirt devils,lost world) are totally wrong
-		vp->angle_top		=  atan2f(Util::Uint32AsFloat(vpnode[14]),  Util::Uint32AsFloat(vpnode[15]));	// and don't work for the frustum values exactly.
-		vp->angle_bottom	= -atan2f(Util::Uint32AsFloat(vpnode[18]), -Util::Uint32AsFloat(vpnode[19]));	// Perhaps they are just used for culling and not rendering.
-		*/
 
 		float cv = Util::Uint32AsFloat(vpnode[0x8]);	// 1/(left-right)
 		float cw = Util::Uint32AsFloat(vpnode[0x9]);	// 1/(top-bottom)
 		float io = Util::Uint32AsFloat(vpnode[0xa]);	// top / bottom (ratio) - ish
 		float jo = Util::Uint32AsFloat(vpnode[0xb]);	// left / right (ratio)
 
+		// clipping plane normals
+		m_planes.bnlu = Util::Uint32AsFloat(vpnode[0xc]);
+		m_planes.bnlv = Util::Uint32AsFloat(vpnode[0xd]);
+		m_planes.bntu = Util::Uint32AsFloat(vpnode[0xe]);
+		m_planes.bntw = Util::Uint32AsFloat(vpnode[0xf]);
+		m_planes.bnru = Util::Uint32AsFloat(vpnode[0x10]);
+		m_planes.bnrv = Util::Uint32AsFloat(vpnode[0x11]);
+		m_planes.bnbu = Util::Uint32AsFloat(vpnode[0x12]);
+		m_planes.bnbw = Util::Uint32AsFloat(vpnode[0x13]);
+		m_planes.correction = 1.0f;		// might get changed by the calc viewport method
+
 		vp->angle_left		= (0.0f - jo) / cv;
 		vp->angle_right		= (1.0f - jo) / cv;
-		vp->angle_bottom	= -(1.0f - io)/ cw;
-		vp->angle_top		= -(0.0f - io)/ cw;
+		vp->angle_bottom	= -(1.0f - io) / cw;
+		vp->angle_top		= -(0.0f - io) / cw;
 
-		// calculate the frustum shape, near/far pair are dummy values
-		CalcViewport(vp, 1.f, 1000.f);
+		vp->cota = Util::Uint32AsFloat(vpnode[0x3]);
 
-		// calculate frustum planes
-		CalcFrustumPlanes(m_planes, vp->projectionMatrix);	// we need to calc a 'projection matrix' to get the correct frustum planes for clipping
+		CalcViewport(vp);
 
 		// Lighting (note that sun vector points toward sun -- away from vertex)
-		vp->lightingParams[0] =  Util::Uint32AsFloat(vpnode[0x05]);							// sun X
+		vp->lightingParams[0] = Util::Uint32AsFloat(vpnode[0x05]);							// sun X
 		vp->lightingParams[1] = -Util::Uint32AsFloat(vpnode[0x06]);							// sun Y (- to convert to ogl cordinate system)
 		vp->lightingParams[2] = -Util::Uint32AsFloat(vpnode[0x04]);							// sun Z (- to convert to ogl cordinate system)
 		vp->lightingParams[3] = std::max(0.f, std::min(Util::Uint32AsFloat(vpnode[0x07]), 1.0f));	// sun intensity (clamp to 0-1)
 		vp->lightingParams[4] = (float)((vpnode[0x24] >> 8) & 0xFF) * (float)(1.0 / 255.0);	// ambient intensity
 		vp->lightingParams[5] = 0.0f;	// reserved
-		
-		vp->sunClamp		= m_sunClamp;
-		vp->intensityClamp	= (m_step == 0x10);		// just step 1.0 ?
-		vp->hardwareStep	= m_step;
-		
+
+		vp->sunClamp = m_sunClamp;
+		vp->intensityClamp = m_step10;				// just step 1.0 ?
+		vp->step15Luminous = m_step15;
+
 		// Spotlight
 		int spotColorIdx = (vpnode[0x20] >> 11) & 7;									// spotlight color index
 		int spotFogColorIdx = (vpnode[0x20] >> 8) & 7;									// spotlight on fog color index
@@ -1097,8 +1255,8 @@ void CNew3D::RenderViewport(UINT32 addr)
 		vp->spotFogColor[1] = color[spotFogColorIdx][1];
 		vp->spotFogColor[2] = color[spotFogColorIdx][2];
 
-		// spotlight is specified in terms of physical resolution
-		vp->spotEllipse[1] = 384.0f - vp->spotEllipse[1];								// flip Y position
+		// Spotlight Y is top-referenced. Convert to bottom-referenced.
+		vp->spotEllipse[1] = m_screenHeight - vp->spotEllipse[1];
 
 		// Avoid division by zero
 		vp->spotEllipse[2] = std::max(1.0f, vp->spotEllipse[2]);
@@ -1118,19 +1276,19 @@ void CNew3D::RenderViewport(UINT32 addr)
 		vp->losPosY = (int)(((vpnode[0x1c] >> 16) / 16.0f) + 0.5f);						// y position 0 starts from the top
 
 		// Fog
-		vp->fogParams[0] = (float)((vpnode[0x22] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog color R
-		vp->fogParams[1] = (float)((vpnode[0x22] >> 8) & 0xFF) * (float)(1.0 / 255.0);	// fog color G
-		vp->fogParams[2] = (float)((vpnode[0x22] >> 0) & 0xFF) * (float)(1.0 / 255.0);	// fog color B
-		vp->fogParams[3] = std::abs(Util::Uint32AsFloat(vpnode[0x23]));					// fog density	- ocean hunter uses negative values, but looks the same
-		vp->fogParams[4] = (float)(INT16)(vpnode[0x25] & 0xFFFF)* (float)(1.0 / 255.0);	// fog start
+		vp->fogColour[0]	= (float)((vpnode[0x22] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog color R
+		vp->fogColour[1]	= (float)((vpnode[0x22] >> 8) & 0xFF) * (float)(1.0 / 255.0);	// fog color G
+		vp->fogColour[2]	= (float)((vpnode[0x22] >> 0) & 0xFF) * (float)(1.0 / 255.0);	// fog color B
+		vp->fogDensity		= std::abs(Util::Uint32AsFloat(vpnode[0x23]));					// fog density	- ocean hunter uses negative values, but looks the same
+		vp->fogStart		= (float)(INT16)(vpnode[0x25] & 0xFFFF) * (float)(1.0 / 255.0);	// fog start
+		vp->fogAttenuation	= (float)((vpnode[0x24] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog attenuation
+		vp->fogAmbient		= (float)((vpnode[0x25] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog ambient
 
-		// Avoid Infinite and NaN values for Star Wars Trilogy
-		if (std::isinf(vp->fogParams[3]) || std::isnan(vp->fogParams[3])) {
-			for (int i = 0; i < 7; i++) vp->fogParams[i] = 0.0f;
+		// PRO_Viewport::SetFogRanges(start, end) stores density = 1/(end - start); 
+		// If start = end fog is effectively disabled and it writes 99999 instead of Inf
+		if (!(vp->fogDensity < 99999.f)) {
+			vp->fogDensity = 0;
 		}
-
-		vp->fogParams[5] = (float)((vpnode[0x24] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog attenuation
-		vp->fogParams[6] = (float)((vpnode[0x25] >> 16) & 0xFF) * (float)(1.0 / 255.0);	// fog ambient
 
 		vp->scrollFog = (float)(vpnode[0x20] & 0xFF) * (float)(1.0 / 255.0);				// scroll fog
 		vp->scrollAtt = (float)(vpnode[0x24] & 0xFF) * (float)(1.0 / 255.0);				// scroll attenuation
@@ -1139,15 +1297,23 @@ void CNew3D::RenderViewport(UINT32 addr)
 		m_nodeAttribs.Reset();
 
 		// Set up coordinate system and base matrix
-		InitMatrixStack(matrixBase, m_modelMat);
+		InitMatrixStack(matrixBase, vpnode[0x15] & 0xFFF, m_modelMat);
 
-		// Descend down the node link. Need to start with a culling node because that defines our culling radius.
-		auto childptr = vpnode[0x02];
-		if (((childptr >> 24) & 0x5) == 0) {
-			DescendNodePtr(vpnode[0x02]);
+		// a work around for vf3, when booting it tries to render before the memory is setup correctly and it's matrices are garbage
+		// this causes long start up times. The real h/w probably bails out after a fixed number of polys or some other mechanism
+		if (std::fpclassify(m_modelMat.currentMatrix[0]) == FP_SUBNORMAL && 
+			std::fpclassify(m_modelMat.currentMatrix[1]) == FP_SUBNORMAL && 
+			std::fpclassify(m_modelMat.currentMatrix[2]) == FP_SUBNORMAL) {
+			vpDisabled = true;
+		}
+
+		// Descend down the node link
+		if (!vpDisabled) {
+			UINT32 child = vpnode[0x02];
+			DescendNodePtr(child);
 		}
 	}
-
+	
 	// render next viewport
 	if (vpnode[0x01] != 0x01000000) {
 		RenderViewport(vpnode[0x01]);
@@ -1170,26 +1336,26 @@ void CNew3D::CopyVertexData(const R3DPoly& r3dPoly, std::vector<FVertex>& vertex
 			vertexArray.emplace_back(r3dPoly, 2);
 			vertexArray.emplace_back(r3dPoly, 3);
 
-			// check for identical points (ie forced triangle) and replace with average point
-			// if we don't do this our quad code falls apart
+			// check for identical points (i.e. forced triangle), as the quad code can be inprecise for these:
+			// the quad shader detects them and draws just the triangle
 			FVertex* v = (&vertexArray.back()) - 3;
 
 			for (int i = 0; i < 4; i++) {
 
 				int next1 = (i + 1) % 4;
-				int next2 = (i + 2) % 4;
 
 				if (FVertex::Equal(v[i], v[next1])) {
-					FVertex::Average(v[next1], v[next2], v[next1]);
+					v[next1] = v[i];
+					std::rotate(v, v + (next1 + 1) % 4, v + 4);	// copy to slot 3, after its original in slot 2, as the quad shader looks for it there
 					break;
 				}
 			}
 		}
 		else {
-			vertexArray.emplace_back(r3dPoly, 0);	
+			vertexArray.emplace_back(r3dPoly, 0);
 			vertexArray.emplace_back(r3dPoly, 1);
 			vertexArray.emplace_back(r3dPoly, 2);
-			vertexArray.emplace_back(r3dPoly, 0, 2);	// last point is an average of 0 and 2
+			vertexArray.emplace_back(r3dPoly, 2);		// last point is a copy of 2 (the quad shader detects this and draws just the triangle)
 		}
 	}
 	else {
@@ -1202,6 +1368,30 @@ void CNew3D::CopyVertexData(const R3DPoly& r3dPoly, std::vector<FVertex>& vertex
 			vertexArray.emplace_back(r3dPoly, 2);
 			vertexArray.emplace_back(r3dPoly, 3);
 		}
+	}
+}
+
+void CNew3D::GetCoordinates(int width, int height, UINT16 uIn, UINT16 vIn, float uvScale, float& uOut, float& vOut) const
+{
+	uOut = (uIn * uvScale) / width;
+	vOut = (vIn * uvScale) / height;
+}
+
+int CNew3D::GetTexFormat(int originalFormat, bool contour) const
+{
+	if (!contour) {
+		return originalFormat;	// the same
+	}
+
+	switch (originalFormat)
+	{
+	case 1:
+	case 2:
+	case 3:
+	case 4:
+		return originalFormat + 7;		// these formats are identical to 1-4, except they lose the 4 bit alpha part when contour is enabled
+	default:
+		return originalFormat;
 	}
 }
 
@@ -1222,10 +1412,12 @@ void CNew3D::SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph)
 	currentMesh->specularValue	= ph.SpecularValue();
 	currentMesh->fogIntensity	= ph.LightModifier();
 	currentMesh->translatorMap	= ph.TranslatorMap();
+	currentMesh->noLosReturn	= ph.NoLosReturn();
+	currentMesh->smoothShading	= ph.SmoothShading();
 
 	if (currentMesh->textured) {
 
-		currentMesh->format = m_texSheet.GetTexFormat(ph.TexFormat(), ph.AlphaTest());
+		currentMesh->format = GetTexFormat(ph.TexFormat(), ph.AlphaTest());
 
 		if (currentMesh->format == 7) {
 			currentMesh->alphaTest = false;	// alpha test is a 1 bit test, this format needs a lower threshold, since it has 16 levels of transparency
@@ -1237,6 +1429,7 @@ void CNew3D::SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph)
 		currentMesh->height			= ph.TexHeight();
 		currentMesh->microTexture	= ph.MicroTexture();
 		currentMesh->inverted		= ph.TranslatorMapOffset() == 2;
+		currentMesh->page			= ph.Page();
 
 		{
 			bool smoothU = ph.TexSmoothU();
@@ -1268,18 +1461,17 @@ void CNew3D::SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph)
 
 		if (currentMesh->microTexture) {
 
-			static const float microTexScale[] = { 2.f, 4.f, 16.f, 256.f };
-
 			currentMesh->microTextureID = ph.MicroTextureID();
-			currentMesh->microTextureScale = microTexScale[ph.MicroTextureMinLOD()];
+			currentMesh->microTextureMinLOD = (float)ph.MicroTextureMinLOD();
 		}
 	}
 }
 
 void CNew3D::CacheModel(Model *m, const UINT32 *data)
 {
-	if (data == NULL)
+	if (data == nullptr) {
 		return;
+	}
 
 	UINT16			texCoords[4][2];
 	PolyHeader		ph;
@@ -1289,6 +1481,11 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 	std::unordered_map<UINT64, SortingMesh> sMap;
 
 	ph = data; 
+	ph.SetEnd(ModelMemoryEnd(data));
+	if (!ph.InBounds()) {
+		return;
+	}
+
 	int numTriangles = ph.NumTrianglesTotal();
 
 	// Cache all polygons
@@ -1340,7 +1537,7 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 				//check if we need to recalc tex coords - will only happen if tex tiles are different + sharing vertices
 				if (hash != lastHash) {
 					if (currentMesh->textured) {
-						Texture::GetCoordinates(currentMesh->width, currentMesh->height, texCoords[j][0], texCoords[j][1], uvScale, p.v[j].texcoords[0], p.v[j].texcoords[1]);
+						GetCoordinates(currentMesh->width, currentMesh->height, texCoords[j][0], texCoords[j][1], uvScale, p.v[j].texcoords[0], p.v[j].texcoords[1]);
 					}
 				}
 
@@ -1354,9 +1551,13 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 
 		if (!ph.PolyColor()) {
 			int colorIdx = ph.ColorIndex();
-			p.faceColour[2] = (m_polyRAM[m_colorTableAddr + colorIdx] & 0xFF);
-			p.faceColour[1] = ((m_polyRAM[m_colorTableAddr + colorIdx] >> 8) & 0xFF);
-			p.faceColour[0] = ((m_polyRAM[m_colorTableAddr + colorIdx] >> 16) & 0xFF);
+			UINT32 colorAddr = m_colorTableAddr + colorIdx;
+			if (m_vromIsPolygonRAM) {
+				colorAddr &= 0x00FFFFFF;	// stay inside the 64 MB polygon RAM
+			}
+			p.faceColour[2] = (m_polyRAM[colorAddr] & 0xFF);
+			p.faceColour[1] = ((m_polyRAM[colorAddr] >> 8) & 0xFF);
+			p.faceColour[0] = ((m_polyRAM[colorAddr] >> 16) & 0xFF);
 		}
 		else {
 			p.faceColour[0] = ((ph.header[4] >> 24));
@@ -1376,6 +1577,8 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 			p.v[i].normal[1] = p.faceNormal[1];
 			p.v[i].normal[2] = p.faceNormal[2];
 		}
+
+		p.textureNP = ph.TextureNP() * m_textureNPFactor;
 
 		UINT32* vData = ph.StartOfData();	// vertex data starts here
 
@@ -1407,7 +1610,8 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 				float shade;
 				//==========
 
-				if (!m_shadeIsSigned) {
+				// If specular is enabled fixed shading values are treated as unsigned
+				if (ph.SpecularEnabled()) {
 					shade = (ix & 0xFF) * (float)(1.0 / 255.0);
 				}
 				else {
@@ -1422,7 +1626,7 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 
 			// tex coords
 			if (currentMesh->textured) {
-				Texture::GetCoordinates(currentMesh->width, currentMesh->height, (UINT16)(it >> 16), (UINT16)(it & 0xFFFF), uvScale, texU, texV);
+				GetCoordinates(currentMesh->width, currentMesh->height, (UINT16)(it >> 16), (UINT16)(it & 0xFFFF), uvScale, texU, texV);
 			}
 
 			p.v[j].texcoords[0] = texU;
@@ -1495,13 +1699,16 @@ void CNew3D::CacheModel(Model *m, const UINT32 *data)
 	}
 }
 
-bool CNew3D::IsDynamicModel(UINT32 *data)
+bool CNew3D::IsDynamicModel(UINT32 *data) const
 {
-	if (data == NULL) {
+	if (data == nullptr) {
 		return false;
 	}
 
-	PolyHeader p(data);
+	PolyHeader p(data, ModelMemoryEnd(data));
+	if (!p.InBounds()) {
+		return false;
+	}
 
 	do {
 
@@ -1509,318 +1716,27 @@ bool CNew3D::IsDynamicModel(UINT32 *data)
 			return true;
 		}
 
-		if (p.header[6] == 0) {
-			break;
-		}
-
 	} while (p.NextPoly());
 
 	return false;
 }
 
-bool CNew3D::IsVROMModel(UINT32 modelAddr)
+bool CNew3D::IsVROMModel(UINT32 modelAddr) const
 {
-	return modelAddr >= 0x100000;
+	// Without VROM, models at these addresses are in polygon RAM and can change
+	return !m_vromIsPolygonRAM && modelAddr >= 0x100000;
 }
 
-void CNew3D::CalcTexOffset(int offX, int offY, int page, int x, int y, int& newX, int& newY)
+void CNew3D::CalcViewport(Viewport* vp)
 {
-	newX = (x + offX) & 2047;	// wrap around 2048, shouldn't be required
-
-	int oldPage = y / 1024;
-
-	y -= (oldPage * 1024);	// remove page from tex y
-
-	// calc newY with wrap around, wraps around in the same sheet, not into another memory sheet
-
-	newY = (y + offY) & 1023;
-
-	// add page to Y
-
-	newY += ((oldPage + page) & 1) * 1024;		// max page 0-1
-}
-
-void CNew3D::CalcFrustumPlanes(Plane p[5], const float* matrix)
-{
-	// Left Plane
-	p[0].a = matrix[3] + matrix[0];
-	p[0].b = matrix[7] + matrix[4];
-	p[0].c = matrix[11] + matrix[8];
-	p[0].d = matrix[15] + matrix[12];
-	p[0].Normalise();
-
-	// Right Plane
-	p[1].a = matrix[3] - matrix[0];
-	p[1].b = matrix[7] - matrix[4];
-	p[1].c = matrix[11] - matrix[8];
-	p[1].d = matrix[15] - matrix[12];
-	p[1].Normalise();
-
-	// Bottom Plane
-	p[2].a = matrix[3] + matrix[1];
-	p[2].b = matrix[7] + matrix[5];
-	p[2].c = matrix[11] + matrix[9];
-	p[2].d = matrix[15] + matrix[13];
-	p[2].Normalise();
-
-	// Top Plane
-	p[3].a = matrix[3] - matrix[1];
-	p[3].b = matrix[7] - matrix[5];
-	p[3].c = matrix[11] - matrix[9];
-	p[3].d = matrix[15] - matrix[13];
-	p[3].Normalise();
-
-	// Front Plane
-	p[4].a = 0.f;
-	p[4].b = 0.f;
-	p[4].c = -1.f;
-	p[4].d = 0.f;
-}
-
-void CNew3D::CalcBox(float distance, BBox& box)
-{
-	//bottom left front
-	box.points[0][0] = -distance;
-	box.points[0][1] = -distance;
-	box.points[0][2] = distance;
-	box.points[0][3] = 1.f;
-
-	//bottom left back
-	box.points[1][0] = -distance;
-	box.points[1][1] = -distance;
-	box.points[1][2] = -distance;
-	box.points[1][3] = 1.f;
-
-	//bottom right back
-	box.points[2][0] = distance;
-	box.points[2][1] = -distance;
-	box.points[2][2] = -distance;
-	box.points[2][3] = 1.f;
-
-	//bottom right front
-	box.points[3][0] = distance;
-	box.points[3][1] = -distance;
-	box.points[3][2] = distance;
-	box.points[3][3] = 1.f;
-
-	//top left front
-	box.points[4][0] = -distance;
-	box.points[4][1] = distance;
-	box.points[4][2] = distance;
-	box.points[4][3] = 1.f;
-
-	//top left back
-	box.points[5][0] = -distance;
-	box.points[5][1] = distance;
-	box.points[5][2] = -distance;
-	box.points[5][3] = 1.f;
-
-	//top right back
-	box.points[6][0] = distance;
-	box.points[6][1] = distance;
-	box.points[6][2] = -distance;
-	box.points[6][3] = 1.f;
-
-	//top right front
-	box.points[7][0] = distance;
-	box.points[7][1] = distance;
-	box.points[7][2] = distance;
-	box.points[7][3] = 1.f;
-}
-
-void CNew3D::MultVec(const float matrix[16], const float in[4], float out[4]) 
-{
-	for (int i = 0; i < 4; i++) {
-		out[i] =
-			in[0] * matrix[0 * 4 + i] +
-			in[1] * matrix[1 * 4 + i] +
-			in[2] * matrix[2 * 4 + i] +
-			in[3] * matrix[3 * 4 + i];
-	}
-}
-
-void CNew3D::TransformBox(const float *m, BBox& box)
-{
-	for (int i = 0; i < 8; i++) {
-		float v[4];
-		MultVec(m, box.points[i], v);
-		box.points[i][0] = v[0];
-		box.points[i][1] = v[1];
-		box.points[i][2] = v[2];
-	}
-}
-
-Clip CNew3D::ClipBox(const BBox& box, Plane planes[5])
-{
-	int count = 0;
-
-	for (int i = 0; i < 8; i++) {
-
-		int temp = 0;
-
-		for (int j = 0; j < 5; j++) {
-			if (planes[j].DistanceToPoint(box.points[i]) >= 0.f) {
-				temp++;
-			}
-		}
-
-		if (temp == 5) count++;		// point is inside all 4 frustum planes
-	}
-
-	if (count == 8)	return Clip::INSIDE;
-	if (count > 0)	return Clip::INTERCEPT;
-	
-	//if we got here all points are outside of the view frustum
-	//check for all points being side same of any plane, means box outside of view
-
-	for (int i = 0; i < 5; i++) {
-
-		int temp = 0;
-
-		for (int j = 0; j < 8; j++) {
-			if (planes[i].DistanceToPoint(box.points[j]) >= 0.f) {
-				temp++;
-			}
-		}
-
-		if (temp == 0) {
-			return Clip::OUTSIDE;
-		}
-	}
-
-	//if we got here, box is traversing view frustum
-
-	return Clip::INTERCEPT;
-}
-
-void CNew3D::CalcBoxExtents(const BBox& box)
-{
-	for (int i = 0; i < 8; i++) {
-		if (box.points[i][2] < 0.f) {
-			m_nfPairs[m_currentPriority].zNear = std::max(box.points[i][2], m_nfPairs[m_currentPriority].zNear);
-			m_nfPairs[m_currentPriority].zFar  = std::min(box.points[i][2], m_nfPairs[m_currentPriority].zFar);
-		}
-	}
-}
-
-void CNew3D::ClipPolygon(ClipPoly& clipPoly, Plane planes[5])
-{
-	//============
-	ClipPoly temp;
-	ClipPoly *in;
-	ClipPoly *out;
-	//============
-
-	in = &clipPoly;
-	out = &temp;
-
-	for (int i = 0; i < 4; i++) {
-
-		//=================
-		bool	currentIn;
-		float	currentDot;
-		//=================
-
-		currentDot	= planes[i].DotProduct(in->list[0].pos);
-		currentIn	= (currentDot + planes[i].d) >= 0.f;
-		out->count	= 0;
-
-		for (int j = 0; j < in->count; j++) {
-
-			if (currentIn) {
-				out->list[out->count] = in->list[j];
-				out->count++;
-			}
-
-			int nextIndex = j + 1;
-			if (nextIndex >= in->count) {
-				nextIndex = 0;
-			}
-
-			float nextDot = planes[i].DotProduct(in->list[nextIndex].pos);
-			bool nextIn	= (nextDot + planes[i].d) >= 0.f;
-
-			// we have an intersection
-			if (currentIn != nextIn) {
-
-				float u = (currentDot + planes[i].d) / (currentDot - nextDot);
-
-				const float* p1 = in->list[j].pos;
-				const float* p2 = in->list[nextIndex].pos;
-
-				out->list[out->count].pos[0] = p1[0] + ((p2[0] - p1[0]) * u);
-				out->list[out->count].pos[1] = p1[1] + ((p2[1] - p1[1]) * u);
-				out->list[out->count].pos[2] = p1[2] + ((p2[2] - p1[2]) * u);
-				out->count++;
-			}
-
-			currentDot = nextDot;
-			currentIn = nextIn;
-		}
-
-		std::swap(in, out);
-	}
-}
-
-void CNew3D::ClipModel(const Model *m)
-{
-	//===============================
-	ClipPoly				clipPoly;
-	std::vector<FVertex>*	vertices;
-	int						offset;
-	//===============================
-
-	if (m->dynamic) {
-		vertices = &m_polyBufferRam;
-		offset = MAX_ROM_VERTS;
-	}
-	else {
-		vertices = &m_polyBufferRom;
-		offset = 0;
-	}
-
-	for (const auto &mesh : *m->meshes) {
-
-		int start = mesh.vboOffset - offset;
-		
-		for (int i = 0; i < mesh.vertexCount; i += m_numPolyVerts) {							// inc to next poly
-
-			for (int j = 0; j < m_numPolyVerts; j++) {
-				MultVec(m->modelMat, (*vertices)[start + i + j].pos, clipPoly.list[j].pos);		// copy all 3 of 4  our transformed vertices into our clip poly struct
-			}
-
-			clipPoly.count = m_numPolyVerts;
-
-			ClipPolygon(clipPoly, m_planes);
-
-			for (int j = 0; j < clipPoly.count; j++) {
-				if (clipPoly.list[j].pos[2] < 0.f) {
-					m_nfPairs[m_currentPriority].zNear = std::max(clipPoly.list[j].pos[2], m_nfPairs[m_currentPriority].zNear);
-					m_nfPairs[m_currentPriority].zFar  = std::min(clipPoly.list[j].pos[2], m_nfPairs[m_currentPriority].zFar);
-				}
-			}
-		}
-	}
-}
-
-void CNew3D::CalcViewport(Viewport* vp, float near, float far)
-{
-	if (far > 1e30f) {
-		far = near * 1000000.f;				// fix for ocean hunter which passes some FLT_MAX for a few matrices. HW must have some safe guard for these
-	}
-
-	if (near < far / 1000000.f) {
-		near = far / 1000000.f;				// if we get really close to zero somehow, we will have almost no depth precision
-	}
-
-	float l = near * vp->angle_left;	// we need to calc the shape of the projection frustum for culling
-	float r = near * vp->angle_right;
-	float t = near * vp->angle_top;
-	float b = near * vp->angle_bottom;
+	float l = vp->angle_left;	// we need to calc the shape of the projection frustum for culling
+	float r = vp->angle_right;
+	float t = vp->angle_top;
+	float b = vp->angle_bottom;
 
 	vp->projectionMatrix.LoadIdentity();	// reset matrix
 
-	if ((vp->vpX == 0) && (vp->vpWidth >= 495) && (vp->vpY == 0) && (vp->vpHeight >= 383)) {
+	if (m_wideScreen && (vp->vpX == 0) && (vp->vpWidth >= m_screenWidth - 1) && (vp->vpY == 0) && (vp->vpHeight >= m_screenHeight - 1)) {
 
 		/*
 		 * Compute aspect ratio correction factor. "Window" refers to the full GL
@@ -1848,23 +1764,32 @@ void CNew3D::CalcViewport(Viewport* vp, float near, float far)
 		// screen and non-wide-screen modes have identical resolution parameters
 		// and only their scissor box differs)
 		float correction = windowAR / viewableAreaAR;
+		m_planes.correction = 1.0f / correction;
 
 		vp->x		= 0;
-		vp->y		= m_yOffs + (int)((float)(384 - (vp->vpY + vp->vpHeight))*m_yRatio);
+		vp->y		= m_yOffs + (int)((m_screenHeight - (vp->vpY + vp->vpHeight))*m_yRatio);
 		vp->width	= m_totalXRes;
-		vp->height = (int)((float)vp->vpHeight*m_yRatio);
+		vp->height = (int)(vp->vpHeight*m_yRatio);
 
-		vp->projectionMatrix.Frustum(l*correction, r*correction, b, t, near, far);
+		vp->projectionMatrix.FrustumRZ(l*correction, r*correction, b, t, NEAR_PLANE);
 	}
 	else {
 
-		vp->x		= m_xOffs + (int)((float)vp->vpX*m_xRatio);
-		vp->y		= m_yOffs + (int)((float)(384 - (vp->vpY + vp->vpHeight))*m_yRatio);
-		vp->width	= (int)((float)vp->vpWidth*m_xRatio);
-		vp->height	= (int)((float)vp->vpHeight*m_yRatio);
+		vp->x		= m_xOffs + (int)(vp->vpX*m_xRatio);
+		vp->y		= m_yOffs + (int)((m_screenHeight - (vp->vpY + vp->vpHeight))*m_yRatio);
+		vp->width	= (int)(vp->vpWidth*m_xRatio);
+		vp->height	= (int)(vp->vpHeight*m_yRatio);
 
-		vp->projectionMatrix.Frustum(l, r, b, t, near, far);
+		vp->projectionMatrix.FrustumRZ(l, r, b, t, NEAR_PLANE);
 	}
+}
+
+void CNew3D::TranslateTexture(unsigned& x, unsigned& y, int width, int height, int& page) const
+{
+	page = y / 1024;
+
+	// remove page from y coordinate
+	y -= (page * 1024);
 }
 
 void CNew3D::SetSunClamp(bool enable)
@@ -1872,9 +1797,9 @@ void CNew3D::SetSunClamp(bool enable)
 	m_sunClamp = enable;
 }
 
-void CNew3D::SetSignedShade(bool enable)
+void CNew3D::SetBlockCulling(bool enable)
 {
-	m_shadeIsSigned = enable;
+	m_blockCulling = enable;
 }
 
 float CNew3D::GetLosValue(int layer)
@@ -1885,10 +1810,10 @@ float CNew3D::GetLosValue(int layer)
 	return m_losFront->value[layer];
 }
 
-void CNew3D::TranslateLosPosition(int inX, int inY, int& outX, int& outY)
+void CNew3D::TranslateLosPosition(int inX, int inY, int& outX, int& outY) const
 {
-	// remap real3d 496x384 to our new viewport
-	inY = 384 - inY;
+	// Convert from top-referenced to bottom-referenced Y.
+	inY = (int)m_screenHeight - inY;
 
 	outX = m_xOffs + int(inX * m_xRatio);
 	outY = m_yOffs + int(inY * m_yRatio);
@@ -1903,20 +1828,29 @@ bool CNew3D::ProcessLos(int priority)
 				int losX, losY;
 				TranslateLosPosition(n.viewport.losPosX, n.viewport.losPosY, losX, losY);
 
-				float depth;
-				glReadPixels(losX, losY, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+				float range[2];
+				glReadPixels(losX, losY, 1, 1, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, range);
+				GLubyte stencilVal = Util::FloatAsInt32(range[1]);
 
-				if (depth < 0.99f || depth == 1.0f) {		// kinda guess work but when depth = 1, haven't drawn anything, when 0.99~ drawing sky somewhere far
-					return false;
+				float zVal = range[0] / NEAR_PLANE;
+
+				// apply our mask to stencil, because layered poly attributes use the lower bits
+				stencilVal &= 0x80;
+
+				// if the stencil val is zero that means we've hit sky or whatever, if it hits a 1 we've hit geometry
+				// the real3d returns 1 in the top bit of the float if the line of sight test passes (ie doesn't hit geometry)
+
+				auto zValP = reinterpret_cast<unsigned char*>(&zVal);	// this is legal in c++, casting to int technically isn't
+
+				if (stencilVal == 0) {
+					zValP[0] |= 1;		// set first bit to 1
+				}
+				else {
+					zValP[0] &= 0xFE;	// set first bit to zero
 				}
 
-				depth = 2.0f * depth - 1.0f;
-
-				float zNear = m_nfPairs[priority].zNear;
-				float zFar	= m_nfPairs[priority].zFar;
-				float zVal	= 2.0f * zNear * zFar / (zFar + zNear - depth * (zFar - zNear));
-
 				m_losBack->value[priority] = zVal;
+
 				return true;
 			}
 		}

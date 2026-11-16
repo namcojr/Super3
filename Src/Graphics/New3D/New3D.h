@@ -1,4 +1,3 @@
-
 /**
 ** Supermodel
 ** A Sega Model 3 Arcade Emulator.
@@ -29,17 +28,13 @@
 #ifndef INCLUDED_NEW3D_H
 #define INCLUDED_NEW3D_H
 
-#ifdef __ANDROID__
-#include <GLES3/gl3.h>
-#else
+#include <unordered_map>
+#include <atomic>
 #include <GL/glew.h>
-#endif
 #include "Types.h"
-#include "TextureSheet.h"
 #include "Graphics/IRender3D.h"
 #include "Model.h"
 #include "Mat4.h"
-#include "Util/NewConfig.h"
 #include "R3DShader.h"
 #include "VBO.h"
 #include "R3DData.h"
@@ -48,13 +43,12 @@
 #include "R3DScrollFog.h"
 #include "PolyHeader.h"
 #include "R3DFrameBuffers.h"
-#include <unordered_set>
 #include <mutex>
-#include <memory>
+#include "TextureBank.h"
 
 namespace New3D {
 
-class CNew3D : public IRender3D
+class CNew3D final : public IRender3D
 {
 public:
 	/*
@@ -64,7 +58,7 @@ public:
 	* EndFrame(). This function traverses the scene database and builds up display
 	* lists.
 	*/
-	void RenderFrame(void);
+	void RenderFrame(void) override;
 
 	/*
 	* BeginFrame(void):
@@ -72,7 +66,7 @@ public:
 	* Prepare to render a new frame. Must be called once per frame prior to
 	* drawing anything.
 	*/
-	void BeginFrame(void);
+	void BeginFrame(void) override;
 
 	/*
 	* EndFrame(void):
@@ -80,7 +74,7 @@ public:
 	* Signals the end of rendering for this frame. Must be called last during
 	* the frame.
 	*/
-	void EndFrame(void);
+	void EndFrame(void) override;
 
 	/*
 	* UploadTextures(x, y, width, height):
@@ -93,7 +87,7 @@ public:
 	*		width	Width of texture data in texels.
 	*		height	Height.
 	*/
-	void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height);
+	void UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height) override;
 
 	/*
 	* AttachMemory(cullingRAMLoPtr, cullingRAMHiPtr, polyRAMPtr, vromPtr,
@@ -111,20 +105,30 @@ public:
 	*/
 	void AttachMemory(const UINT32 *cullingRAMLoPtr,
 		const UINT32 *cullingRAMHiPtr, const UINT32 *polyRAMPtr,
-		const UINT32 *vromPtr, const UINT16 *textureRAMPtr);
+		const UINT32 *vromPtr, const UINT16 *textureRAMPtr) override;
 
 	/*
 	* SetStepping(stepping):
 	*
-	* Sets the Model 3 hardware stepping, which also determines the Real3D
-	* functionality. The default is Step 1.0. This should be called prior to
-	* any other emulation functions and after Init().
+	* Sets the hardware stepping, which determines the data formats and some
+	* behavior. The Real3D Pro-1000 uses the Model 3 Step 1.0 formats. This
+	* should be called prior to any other emulation functions and after
+	* Init().
 	*
 	* Parameters:
-	*   stepping  0x10 for Step 1.0, 0x15 for Step 1.5, 0x20 for Step 2.0, or
-	*             0x21 for Step 2.1. Anything else defaults to 1.0.
+	*   stepping  Hardware stepping.
 	*/
-	void SetStepping(int stepping);
+	void SetStepping(Game::Stepping stepping) override;
+
+	/*
+	* SetVROMIsPolygonRAM(enable):
+	*
+	* If enabled, there is no VROM (Real3D Pro-1000): the VROM pointer points
+	* to polygon RAM, so models at 0x100000 and above are in writable polygon
+	* RAM. Then models are not cached as ROM models, and color table addresses
+	* have 24 bits instead of 20 bits.
+	*/
+	void SetVROMIsPolygonRAM(bool enable) override;
 
 	/*
 	* Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes):
@@ -145,11 +149,25 @@ public:
 	*		totalYRes	Vertical resolution.
 	*
 	* Returns:
-	*		OKAY is successful, otherwise FAILED if a non-recoverable error
+	*		OKAY if successful, otherwise FAILED if a non-recoverable error
 	*		occurred. Any allocated memory will not be freed until the
 	*		destructor is called. Prints own error messages.
 	*/
-	Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes);
+	Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned aaTarget) override;
+
+	/*
+	 * SetScreenSize(width, height):
+	 *
+	 * Set the physical display size that viewport coordinates refer to.
+	 * Model 3 uses 496x384. Pro-1000 uses values from the selected sync file
+	 * (for example, 636x480 for sync file 1). Call this before Init(), or
+	 * call it at any time to update the ratios when the sync file changes.
+	 *
+	 * Parameters:
+	 *		width	Display width in native coordinate units.
+	 *		height	Display height in native coordinate units.
+	 */
+	void SetScreenSize(float width, float height) override;
 
 	/*
 	* SetSunClamp(bool enable);
@@ -159,17 +177,17 @@ public:
 	* Parameters:
 	*		enable	Set clamp mode
 	*/
-	void SetSunClamp(bool enable);
+	void SetSunClamp(bool enable) override;
 
 	/*
-	* SetSignedShade(bool enable);
+	* SetBlockCulling(bool enable);
 	*
-	* Sets the sign-ness of fixed shading value
+	* When enabled, clears screen to white and disables 3D rendering
 	*
 	* Parameters:
-	*		enable	Fixed shading is expressed as signed value
+	*		enable	Set block culling
 	*/
-	void SetSignedShade(bool enable);
+	void SetBlockCulling(bool enable) override;
 
 	/*
 	* GetLosValue(int layer);
@@ -179,7 +197,7 @@ public:
 	* Parameters:
 	*		layer	Priority layer to read from
 	*/
-	float GetLosValue(int layer);
+	float GetLosValue(int layer) override;
 
 	/*
 	* CRender3D(config):
@@ -201,10 +219,14 @@ private:
 	// Real3D address translation
 	const UINT32 *TranslateCullingAddress(UINT32 addr);
 	const UINT32 *TranslateModelAddress(UINT32 addr);
+	const UINT32 *ModelMemoryEnd(const UINT32 *data) const;	// one past the end of the memory a model lives in
 
 	// Matrix stack
 	void MultMatrix(UINT32 matrixOffset, Mat4& mat);
-	void InitMatrixStack(UINT32 matrixBaseAddr, Mat4& mat);
+	void MultInverseMatrix(UINT32 matrixOffset, Mat4& mat);
+	void InitMatrixStack(UINT32 matrixBaseAddr, UINT32 envIdx, Mat4& mat);
+	void ResetMatrix(Mat4& mat) const;
+	void SaveCoordSysRot();
 
 	// Scene database traversal
 	bool DrawModel(UINT32 modelAddr);
@@ -214,65 +236,70 @@ private:
 	void RenderViewport(UINT32 addr);
 
 	// building the scene
+	int	GetTexFormat(int originalFormat, bool contour) const;
 	void SetMeshValues(SortingMesh *currentMesh, PolyHeader &ph);
 	void CacheModel(Model *m, const UINT32 *data);
 	void CopyVertexData(const R3DPoly& r3dPoly, std::vector<FVertex>& vertexArray);
+	void GetCoordinates(int width, int height, UINT16 uIn, UINT16 vIn, float uvScale, float& uOut, float& vOut) const;
 
 	bool RenderScene(int priority, bool renderOverlay, Layer layer);		// returns if has overlay plane
-	bool IsDynamicModel(UINT32 *data);				// check if the model has a colour palette
-	bool IsVROMModel(UINT32 modelAddr);
+	bool IsDynamicModel(UINT32 *data) const;				// check if the model has a colour palette
+	bool IsVROMModel(UINT32 modelAddr) const;
 	void DrawScrollFog();
+	void DrawAmbientFog();
 	bool SkipLayer(int layer);
 	void SetRenderStates();
 	void DisableRenderStates();
-	void TranslateLosPosition(int inX, int inY, int& outX, int& outY);
+	void TranslateLosPosition(int inX, int inY, int& outX, int& outY) const;
 	bool ProcessLos(int priority);
-
-	void CalcTexOffset(int offX, int offY, int page, int x, int y, int& newX, int& newY);	
+	void CalcViewport(Viewport* vp);
+	void TranslateTexture(unsigned& x, unsigned& y, int width, int height, int& page) const;
 
 	/*
 	* Data
 	*/
 
 	// Misc
-	const Util::Config::Node &m_config;
 	std::string m_gameName;
 	int m_numPolyVerts;
 	GLenum m_primType;
 
 	// GPU configuration
-	bool m_sunClamp;
-	bool m_shadeIsSigned;
-	bool m_new3dAccurate;
-	bool m_warnedRamOverflow = false;
+	std::atomic_bool m_sunClamp;
+	std::atomic_bool m_blockCulling;
+	bool m_noWhiteFlash;
 
 	// Stepping
-	int		m_step;
+	bool	m_step10;			// Model 3 Step 1.0 or Pro-1000 (Step 1.0 formats and behavior)
+	bool	m_step15;			// Model 3 Step 1.5
 	int		m_offset;			// offset to subtract for words 3 and higher of culling nodes
 	float	m_vertexFactor;		// fixed-point conversion factor for vertices
+	float	m_textureNPFactor;	// fixed-point conversion factor for texture NP values
 
 	// Memory (passed from outside)
 	const UINT32	*m_cullingRAMLo;	// 4 MB
 	const UINT32	*m_cullingRAMHi;	// 1 MB
 	const UINT32	*m_polyRAM;			// 4 MB
-	const UINT32	*m_vrom;			// 64 MB
+	const UINT32	*m_vrom;			// 64 MB (polygon RAM if m_vromIsPolygonRAM)
+	bool			m_vromIsPolygonRAM = false;
 	const UINT16	*m_textureRAM;		// 8 MB
 
 	// Resolution and scaling factors (to support resolutions higher than 496x384) and offsets
 	float		m_xRatio, m_yRatio;
+	float		m_screenWidth = 496.0f, m_screenHeight = 384.0f;	// native display coordinate range (Model 3: 496x384, Pro-1000: sync-file dependent)
 	unsigned	m_xOffs, m_yOffs;
 	unsigned	m_xRes, m_yRes;           // resolution of Model 3's 496x384 display area within the window
 	unsigned 	m_totalXRes, m_totalYRes; // total OpenGL window resolution
+	bool		m_wideScreen;
 
 	// Real3D Base Matrix Pointer
 	const float	*m_matrixBasePtr;
 	UINT32 m_colorTableAddr = 0x400;		// address of color table in polygon RAM
+	float m_coordSysRot[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 };	// rotation of the viewport's coordinate system (no translation), used by reset_matrix
 	LODBlendTable* m_LODBlendTable;
 
-	TextureSheet	m_texSheet;
 	NodeAttributes	m_nodeAttribs;
 	Mat4			m_modelMat;				// current modelview matrix
-	std::unordered_set<UINT32> m_cullingStack;	// recursion guard for culling nodes
 
 	struct LOS
 	{
@@ -290,37 +317,27 @@ private:
 	std::vector<FVertex> m_polyBufferRam;		// dynamic polys
 	std::vector<FVertex> m_polyBufferRom;		// rom polys
 	std::unordered_map<UINT32, std::shared_ptr<std::vector<Mesh>>> m_romMap;	// a hash table for all the ROM models. The meshes don't have model matrices or tex offsets yet
+	TextureBank			m_textureBank[2];
 
+	GLuint m_vao;
 	VBO m_vbo;								// large VBO to hold our poly data, start of VBO is ROM data, ram polys follow
 	R3DShader m_r3dShader;
-	std::unique_ptr<R3DScrollFog> m_r3dScrollFog;
-	std::unique_ptr<R3DFrameBuffers> m_r3dFrameBuffers;
+	R3DScrollFog m_r3dScrollFog;
+	R3DFrameBuffers m_r3dFrameBuffers;
+	GLuint m_aaTarget;						// optional, maybe zero
 
-	Plane m_planes[5];
-
-	struct BBox
+	struct
 	{
-		V4::Vec4 points[8];
-	};
-
-	struct NFPair
-	{
-		float zNear;
-		float zFar;
-	};
-
-	NFPair m_nfPairs[4];
-	int m_currentPriority;
-
-	void CalcFrustumPlanes	(Plane p[5], const float* matrix);
-	void CalcBox			(float distance, BBox& box);
-	void TransformBox		(const float *m, BBox& box);
-	void MultVec			(const float matrix[16], const float in[4], float out[4]);
-	Clip ClipBox			(const BBox& box, Plane planes[5]);
-	void ClipModel			(const Model *m);
-	void ClipPolygon		(ClipPoly& clipPoly, Plane planes[5]);
-	void CalcBoxExtents		(const BBox& box);
-	void CalcViewport		(Viewport* vp, float near, float far);
+		float bnlu;
+		float bnlv;
+		float bntu;
+		float bntw;
+		float bnru;
+		float bnrv;
+		float bnbu;
+		float bnbw;
+		float correction;
+	} m_planes;	
 };
 
 } // New3D

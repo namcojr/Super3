@@ -1,3 +1,24 @@
+/**
+ ** Supermodel
+ ** A Sega Model 3 Arcade Emulator.
+ ** Copyright 2003-2026 The Supermodel Team
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #include "Util/NewConfig.h"
 #include "OSD/Logger.h"
 #include "Pkgs/tinyxml2.h"
@@ -19,7 +40,7 @@ namespace Util
 
       // Push the top level of the XML tree
       for (const XMLElement *e = xml.RootElement(); e != 0; e = e->NextSiblingElement())
-        q.push( { e, config } );
+        q.emplace(e, config);
 
       // Process the elements in order, pushing subsequent levels along with the
       // config nodes to add them to
@@ -38,7 +59,7 @@ namespace Util
 
         // Push all child elements
         for (const XMLElement *e = element->FirstChildElement(); e != 0; e = e->NextSiblingElement())
-          q.push( { e, node } );
+          q.emplace(e, node);
       }
     }
 
@@ -213,21 +234,97 @@ namespace Util
     void MergeINISections(Node *merged, const Node &x, const Node &y)
     {
       *merged = Node(x.Key());  // result has same key as x
+
+      std::map<std::string, std::shared_ptr<ValueRange>> mapX;
+      std::map<std::string, std::shared_ptr<ValueRange>> mapY;
+
       // First copy settings from section x
       for (auto it = x.begin(); it != x.end(); ++it)
       {
         if (it->IsLeaf())
         {
           // INI semantics: take care to only create a single setting per key
-          merged->Set(it->Key(), it->GetValue());
+          auto key = it->Key();
+          auto val = it->GetValue();
+
+          merged->Set(key, val);
+
+          //build new map from value ranges
+          if (val) {
+            mapX[key] = val->GetValueRange();
+          }
         }
       }
+
       // Merge in settings from section y
       for (auto it = y.begin(); it != y.end(); ++it)
       {
-        if (it->IsLeaf() && it->Exists())
-          merged->Set(it->Key(), it->GetValue());
+        if (it->IsLeaf() && it->Exists()) {
+
+          auto key = it->Key();
+          auto val = it->GetValue();
+
+          merged->Set(key, val);
+
+          //build new map from value ranges
+          if (val) {
+            mapY[key] = val->GetValueRange();
+          }
+        }
       }
+
+      // merge the value ranges if they exist for the keys
+      // this code is overly cumbersome 
+      for (auto& m : mapX) {
+          if (m.second) {
+
+            for (auto it = merged->begin(); it != merged->end(); ++it) {
+
+                auto key = it->Key();
+                auto val = it->GetValue();
+
+                if (m.first == key) {
+                    if (val) {
+                        val->SetValueRange(m.second);
+                    }
+                }
+            }
+          }
+      }
+    }
+
+    /*
+     * Copies the settings of one INI section into another.
+     *
+     * - Settings from src overwrite those already present in dest; settings not
+     *   present in dest are appended.
+     * - Nodes with children are ignored as per INI semantics (they are sections,
+     *   not settings), so any sections hanging off dest are left untouched. This
+     *   allows the global section of a config to be updated in place without
+     *   disturbing the game-specific sections.
+     * - Values are copied rather than shared so that dest does not alias src.
+     * - dest's key is retained.
+     */
+    void CopyINISection(Node *dest, const Node &src)
+    {
+      for (auto it = src.begin(); it != src.end(); ++it)
+      {
+        if (it->IsLeaf() && it->Exists())
+        {
+          dest->Set(it->Key(), it->GetValue()->MakeCopy());
+        }
+      }
+    }
+
+    // A section whose settings have all been removed is not written
+    static bool HasSettings(const Node &section)
+    {
+      for (auto it = section.begin(); it != section.end(); ++it)
+      {
+        if (it->IsLeaf() && it->Exists())
+          return true;
+      }
+      return false;
     }
 
     static void WriteSection(std::ofstream &file, const Node &section)
@@ -236,8 +333,10 @@ namespace Util
       file << std::endl;
       for (auto it = section.begin(); it != section.end(); ++it)
       {
-        if (it->IsLeaf()) //TODO: check if value exists?
-          file << it->Key() << " = " << it->ValueAs<std::string>() << std::endl;
+        if (it->IsLeaf()) {//TODO: check if value exists?
+            if (it->Empty()) continue;
+            file << it->Key() << " = " << it->ValueAs<std::string>() << std::endl;
+        }
       }
       file << std::endl << std::endl;
     }
@@ -248,7 +347,7 @@ namespace Util
       file.open(filename);
       if (file.fail())
       {
-        ErrorLog("Unable to write to '%s'. Configuration will not be saved.");
+        ErrorLog("Unable to write to '%s'. Configuration will not be saved.", filename.c_str());
         return;
       }
       if (!header_comment.empty())
@@ -256,7 +355,7 @@ namespace Util
       WriteSection(file, config);
       for (auto it = config.begin(); it != config.end(); ++it)
       {
-        if (it->HasChildren())
+        if (it->HasChildren() && HasSettings(*it))
           WriteSection(file, *it);
       }
       printf("Configuration successfully saved to '%s'.\n", filename.c_str());

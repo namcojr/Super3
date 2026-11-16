@@ -37,17 +37,10 @@
 #include <SDL_audio.h>
 #endif
 
-#ifdef NET_BOARD
 #ifdef SUPERMODEL_OSX
 #include <SDL2_net/SDL_net.h>
 #else
 #include <SDL_net.h>
 #endif
-#endif
-
-
-SDL_Window *get_window();
-unsigned int get_total_width();
-unsigned int get_total_height();
 
 #endif  // INCLUDED_SDLINCLUDES_H

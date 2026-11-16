@@ -1,27 +1,33 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef _MODEL_H_
 #define _MODEL_H_
 
 #include <vector>
-#include <unordered_map>
 #include <memory>
 #include <cstring>
-#include <cstddef>
-#include "Texture.h"
+#include "Types.h"
 #include "Mat4.h"
 
 namespace New3D {
-
-struct ClipVertex
-{
-	float pos[4];
-};
-
-struct ClipPoly
-{
-	ClipVertex list[12];		// what's the max number we can hit for a triangle + 4 planes?
-	int count = 0;
-};
-
 
 struct Vertex					// half vertex
 {
@@ -53,41 +59,51 @@ struct R3DPoly
 	Vertex v[4];			// just easier to have them as an array
 	float faceNormal[3];	// we need this to help work out poly winding, i assume the h/w uses this instead of calculating normals itself
 	UINT8 faceColour[4];	// per face colour
+	float textureNP;
 	int number = 4;
 };
 
-struct FVertex : Vertex			// full vertex including face attributes
+struct FVertex				// full vertex including face attributes
 {
+	Vertex base;			// composition instead of inheritance keeps FVertex standard-layout, making offsetof well-defined
 	float faceNormal[3];
 	UINT8 faceColour[4];
+	float textureNP;
 
-	FVertex& operator=(const Vertex& vertex) 
+	FVertex& operator=(const Vertex& vertex)
 	{
-		memcpy(this, &vertex, sizeof(Vertex));
+		base = vertex;
 		return *this;
 	}
 
 	FVertex() {}
-	FVertex(const R3DPoly& r3dPoly, int index) 
+	FVertex(const R3DPoly& r3dPoly, int index)
 	{
 		for (int i = 0; i < 4; i++) { faceColour[i] = r3dPoly.faceColour[i]; }
 		for (int i = 0; i < 3; i++) { faceNormal[i] = r3dPoly.faceNormal[i]; }
+		textureNP = r3dPoly.textureNP;
 
 		*this = r3dPoly.v[index];
 	}
 
 	FVertex(const R3DPoly& r3dPoly, int index1, int index2)		// average of 2 points
 	{
-		Vertex::Average(r3dPoly.v[index1], r3dPoly.v[index2], *this);
+		Vertex::Average(r3dPoly.v[index1], r3dPoly.v[index2], base);
 
 		// copy face attributes
 		for (int i = 0; i < 4; i++) { faceColour[i] = r3dPoly.faceColour[i]; }
 		for (int i = 0; i < 3; i++) { faceNormal[i] = r3dPoly.faceNormal[i]; }
+		textureNP = r3dPoly.textureNP;
+	}
+
+	static bool Equal(const FVertex& p1, const FVertex& p2)
+	{
+		return Vertex::Equal(p1.base, p2.base);
 	}
 
 	static void Average(const FVertex& p1, const FVertex& p2, FVertex& p3)
 	{
-		Vertex::Average(p1, p2, p3);
+		Vertex::Average(p1.base, p2.base, p3.base);
 		for (int i = 0; i < 4; i++) { p3.faceColour[i] = p1.faceColour[i]; }
 		for (int i = 0; i < 3; i++) { p3.faceNormal[i] = p1.faceNormal[i]; }
 	}
@@ -98,22 +114,24 @@ enum class Layer { colour, trans1, trans2, trans12 /*both 1&2*/, all, none };
 struct Mesh
 {
 	//helper funcs
-	bool Render(Layer layer)
+	bool Render(Layer layer, float nodeAlpha)
 	{
+		bool nAlpha = nodeAlpha < 1.0f;
+
 		switch (layer)
 		{
 		case Layer::colour:
-			if (polyAlpha) {
+			if (polyAlpha || nAlpha) {
 				return false;
 			}
 			break;
 		case Layer::trans1:
-			if ((!textureAlpha && !polyAlpha) || transLSelect) {
+			if ((!textureAlpha && !polyAlpha && !nAlpha) || transLSelect) {
 				return false;
 			}
 			break;
 		case Layer::trans2:
-			if ((!textureAlpha && !polyAlpha) || !transLSelect) {
+			if ((!textureAlpha && !polyAlpha && !nAlpha) || !transLSelect) {
 				return false;
 			}
 			break;
@@ -127,15 +145,21 @@ struct Mesh
 	enum TexWrapMode : int { repeat = 0, repeatClamp, mirror, mirrorClamp };
 
 	// texture
-	int format, x, y, width, height = 0;
-	TexWrapMode wrapModeU;
-	TexWrapMode wrapModeV;
-	bool inverted = false;
+	int		format		= 0;
+	int		x			= 0;
+	int		y			= 0;
+	int		width		= 0;
+	int		height		= 0;
+	int		page		= 0;
+	bool	inverted	= false;
+
+	TexWrapMode wrapModeU = TexWrapMode::repeat;
+	TexWrapMode wrapModeV = TexWrapMode::repeat;
 
 	// microtexture
 	bool	microTexture		= false;
 	int		microTextureID		= 0;
-	float	microTextureScale	= 0;
+	float	microTextureMinLOD	= 0;
 
 	// attributes
 	bool textured		= false;
@@ -146,9 +170,11 @@ struct Mesh
 	bool highPriority	= false;		// rendered over the top
 	bool transLSelect	= false;		// actually the transparency layer, false = layer 0, true = layer 1
 	bool translatorMap	= false;		// colours are multiplied by 16
+	bool noLosReturn	= false;		// line of sight test
 
 	// lighting
 	bool fixedShading	= false;
+	bool smoothShading	= false;
 	bool lighting		= false;
 	bool specular		= false;
 	float shininess		= 0;
@@ -184,18 +210,22 @@ struct Model
 
 	//model scale step 1.5+
 	float scale = 1.0f;
+
+	//node transparency
+	float alpha = 1.0f;
 };
 
 struct Viewport
 {
-	int		vpX;					// these are the original hardware values
-	int		vpY;
-	int		vpWidth;
-	int		vpHeight;
+	float	vpX;					// these are the original hardware values
+	float	vpY;
+	float	vpWidth;
+	float	vpHeight;
 	float	angle_left;
 	float	angle_right;
 	float	angle_top;
 	float	angle_bottom;
+	float	cota;
 
 	Mat4	projectionMatrix;		// projection matrix, we will calc this later when we have scene near/far vals
 
@@ -205,7 +235,11 @@ struct Viewport
 	float	spotEllipse[4];			// spotlight ellipse (see RenderViewport())
 	float	spotRange[2];			// Z range
 	float	spotColor[3];			// color
-	float	fogParams[7];			// fog parameters (...)
+	float	fogColour[3];
+	float	fogStart;
+	float	fogDensity;
+	float	fogAttenuation;
+	float	fogAmbient;
 	float	scrollFog;				// a transparency value that determines if fog is blended over the bottom 2D layer
 	int		losPosX, losPosY;		// line of sight position
 	int		x, y;					// viewport coordinates (scaled and in OpenGL format)
@@ -216,28 +250,26 @@ struct Viewport
 	float	spotFogColor[3];		// spotlight color on fog
 	float	scrollAtt;
 
-	int		hardwareStep;			// not really a viewport param but will do here
+	bool	step15Luminous;			// Step 1.5 luminous polygons (not really a viewport param but will do here)
 };
-
-enum class Clip { INSIDE, OUTSIDE, INTERCEPT, NOT_SET };
 
 class NodeAttributes
 {
 public:
-	static constexpr size_t kMaxAttribStack = 128;
 
 	NodeAttributes();
 
 	bool Push();
 	bool Pop();
-	bool StackLimit();
+	bool StackLimit() const;
 	void Reset();
 
 	int currentTexOffsetX;
 	int currentTexOffsetY;
 	int currentPage;
-	Clip currentClipStatus;
 	float currentModelScale;
+	float currentModelAlpha;
+	bool currentDisableCulling;
 
 private:
 
@@ -246,8 +278,9 @@ private:
 		int texOffsetX;
 		int texOffsetY;
 		int page;
-		Clip clip;
 		float modelScale;
+		float modelAlpha;	// from culling node
+		bool disableCulling;
 	};
 	std::vector<NodeAttribs> m_vecAttribs;
 };

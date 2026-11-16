@@ -22,7 +22,6 @@
 /*
  * SupermodelDebugger.cpp
  */
-
 #ifdef SUPERMODEL_DEBUGGER
 
 #include "SupermodelDebugger.h"
@@ -32,9 +31,7 @@
 #include "ConsoleDebugger.h"
 #include "CPUDebug.h"
 #include "Label.h"
-#ifdef NET_BOARD
-#include "Network/NetBoard.h"
-#endif // NET_BOARD
+#include "Model3/NetBoard.h"
 #include "CPU/Musashi68KDebug.h"
 #include "CPU/PPCDebug.h"
 #include "CPU/Z80Debug.h"
@@ -62,8 +59,8 @@ namespace Debugger
 		// Interrupts
 		cpu->AddInterrupt("VD0", 0, "Unknown video-related");
 		cpu->AddInterrupt("VBL", 1, "VBlank start");
-		cpu->AddInterrupt("VD2", 2, "Unknown video-related");
-		cpu->AddInterrupt("VD3", 3, "Unknown video-related");
+		cpu->AddInterrupt("VDP", 2, "DP done (display processing)");
+		cpu->AddInterrupt("VGP", 3, "GP done (geometry processing)");
 		cpu->AddInterrupt("NET", 4, "Network");
 		cpu->AddInterrupt("UN5", 5, "Unknown");
 		cpu->AddInterrupt("SND", 6, "SCSP (sound)");
@@ -78,20 +75,24 @@ namespace Debugger
 		cpu->AddRegion(0x90000000, 0x9000000B, false, false, "Real3D VROM Texture Port");
 		cpu->AddRegion(0x94000000, 0x940FFFFF, false, false, "Real3D Texture FIFO");
 		cpu->AddRegion(0x98000000, 0x980FFFFF, false, false, "Real3D Polygon RAM");
-#ifndef NET_BOARD
-		cpu->AddRegion(0xC0000000, 0xC00000FF, false, false, "SCSI (Step 1.x)");
-#endif
-#ifdef NET_BOARD
-		cpu->AddRegion(0xC0000000, 0xC001FFFF, false, false, "Network Buffer");
-		cpu->AddRegion(0xC0020000, 0xC003FFFF, false, false, "Network RAM");
-#endif
+		if (!model3->GetGame().netboard_present)
+		{
+			// Netboard not present, SCSI is at 0xC0000000.
+			cpu->AddRegion(0xC0000000, 0xC00000FF, false, false, "SCSI (Step 1.x)");
+		}
+		else
+		{
+			// Netboard present, 0xC0000000 is used for netboard RAM.
+			cpu->AddRegion(0xC0000000, 0xC000FFFF, false, false, "Netboard Shared RAM (Step 1.5+)");
+			cpu->AddRegion(0xC0020000, 0xC002FFFF, false, false, "Netboard Program RAM (Step 1.5+)");
+		}
 		cpu->AddRegion(0xC1000000, 0xC10000FF, false, false, "SCSI (Step 1.x) (Lost World expects it here)");
 		cpu->AddRegion(0xC2000000, 0xC20000FF, false, false, "Real3D DMA (Step 2.x)");
 		cpu->AddRegion(0xF0040000, 0xF004003F, false, false, "Input (Controls) Registers");
 		cpu->AddRegion(0xF0080000, 0xF0080007, false, false, "Sound Board Registers");
 		cpu->AddRegion(0xF00C0000, 0xF00DFFFF, false, false, "Backup RAM");
 		cpu->AddRegion(0xF0100000, 0xF010003F, false, false, "System Registers");
-		cpu->AddRegion(0xF0140000, 0xF014003F, false, false, "Real, 0xTime Clock");
+		cpu->AddRegion(0xF0140000, 0xF014003F, false, false, "Real-Time Clock");
 		cpu->AddRegion(0xF0180000, 0xF019FFFF, false, false, "Security Board RAM");
 		cpu->AddRegion(0xF01A0000, 0xF01A003F, false, false, "Security Board Registers");
 		cpu->AddRegion(0xF0800CF8, 0xF0800CFF, false, false, "MPC105 CONFIG_cpu->AddR (Step 1.x)");
@@ -103,6 +104,7 @@ namespace Debugger
 		cpu->AddRegion(0xF8FFF000, 0xF8FFF0FF, false, false, "MPC105 (Step 1.x) or MPC106 (Step 2.x) Registers");
 		cpu->AddRegion(0xF9000000, 0xF90000FF, false, false, "NCR 53C810 Registers (Step 1.x?)");
 		cpu->AddRegion(0xFE040000, 0xFE04003F, false, false, "Mirrored Input Registers");
+		cpu->AddRegion(0xFE100000, 0xFE10003F, false, false, "Mirrored System Registers");
 		cpu->AddRegion(0xFEC00000, 0xFEDFFFFF, false, false, "MPC106 CONFIG_cpu->AddR (Step 2.x)");
 		cpu->AddRegion(0xFEE00000, 0xFEFFFFFF, false, false, "MPC106 CONFIG_DATA (Step 2.x)");
 		cpu->AddRegion(0xFF000000, 0xFF7FFFFF, true,  true,  "Banked CROM (CROMxx)");
@@ -182,7 +184,7 @@ namespace Debugger
 			cpu->AddMappedIO(addr + 0x17, 1, "EFSDL,EFPAN",                            s_mSlotStr[slot]);
 		}
 		// SCSP Master control registers
-		const char *masterCtl = "SCSP Master Control Registers";
+		static const char *masterCtl = "SCSP Master Control Registers";
 		cpu->AddMappedIO(0x100400, 1, "MEM4MB,DAC18B",                   masterCtl);
 		cpu->AddMappedIO(0x100401, 1, "VER,MVOL",                        masterCtl);
 		cpu->AddMappedIO(0x100402, 2, "RBL,RBP",                         masterCtl);
@@ -232,7 +234,7 @@ namespace Debugger
 		}
 
 		// SCSP Master control registers
-		const char *slaveCtl = "SCSP Slave Control Registers";
+		static const char *slaveCtl = "SCSP Slave Control Registers";
 		cpu->AddMappedIO(0x300400, 1, "MEM4MB,DAC18B",                   slaveCtl);
 		cpu->AddMappedIO(0x300401, 1, "VER,MVOL",                        slaveCtl);
 		cpu->AddMappedIO(0x300402, 2, "RBL,RBP",                         slaveCtl);
@@ -311,7 +313,22 @@ namespace Debugger
 		return cpu;
 	}
 
-#ifdef NET_BOARD
+	CCPUDebug *CSupermodelDebugger::CreateBillBoardCPUDebug(::CModel3 *model3)
+	{
+		CBillBoard *bilBrd = model3->GetBillBoard();
+		if (!bilBrd->IsAttached())
+			return NULL;
+		CZ80Debug *cpu = new CZ80Debug("BillZ80", bilBrd->GetZ80());
+
+		// Regions
+		cpu->AddRegion(0x0000, 0x7FFF, true,  true,  "ROM");
+		cpu->AddRegion(0xE000, 0xFFFF, false, false, "RAM");
+
+		// I/O ports 20-2F are the 315-5338A: 20 DIP switches, 21 command from the main board,
+		// 22-25 the four 7-segment digits, 26 the winner lamps
+		return cpu;
+	}
+
 	CCPUDebug *CSupermodelDebugger::CreateNetBoardCPUDebug(::CModel3 * model3)
 	{
 		CNetBoard *netBrd = dynamic_cast<CNetBoard*>(model3->GetNetBoard());
@@ -328,17 +345,67 @@ namespace Debugger
 		cpu->AddRegion(0x080000, 0x0bffff, false, false, "Net 2"); // commram ???
 		cpu->AddRegion(0x0c0000, 0x0c01ff, false, false, "Net 3"); // ??? size unknown
 
-		const char *NetReg = "NetBoard Control Registers";
+		static const char *NetReg = "NetBoard Control Registers";
 		cpu->AddMappedIO(0x010110, 4, "Reg 1", NetReg);
 		cpu->AddMappedIO(0x010114, 4, "Reg 2", NetReg);
 		cpu->AddMappedIO(0x010180, 4, "Reg 3", NetReg);
 
 		return cpu;
 	}
-#endif
 
-	CSupermodelDebugger::CSupermodelDebugger(::CModel3 *model3, ::CInputs *inputs, std::shared_ptr<CLogger> logger) :
-		CConsoleDebugger(), m_model3(model3), m_inputs(inputs), m_logger(logger),
+	CCPUDebug *CSupermodelDebugger::CreatePro1000CPUDebug(::CPro1000 *pro1000)
+	{
+		CPPCDebug *cpu = new CPPCDebug("MainPPC");
+
+		// Memory regions
+		cpu->AddRegion(0x00000000, 0x003FFFFF, true,  false, "RAM");
+		cpu->AddRegion(0x84000000, 0x8400003F, false, false, "Real3D Status Registers");
+		cpu->AddRegion(0x88000000, 0x88000007, false, false, "Real3D Command Port");
+		cpu->AddRegion(0x8C000000, 0x8C3FFFFF, false, false, "Real3D Culling RAM (Low)");
+		cpu->AddRegion(0x8E000000, 0x8E0FFFFF, false, false, "Real3D Culling RAM (High)");
+		cpu->AddRegion(0x90000000, 0x9000000B, false, false, "Real3D VROM Texture Port (REND_ROM_UPDATE)");
+		cpu->AddRegion(0x94000000, 0x940FFFFF, false, false, "Real3D Texture FIFO");
+		cpu->AddRegion(0x98000000, 0x980FFFFF, false, false, "Real3D Polygon RAM");
+		cpu->AddRegion(0x52000000, 0x52000003, false, false, "8259 Interrupt Acknowledge");
+		cpu->AddRegion(0x54000000, 0x5400000F, false, false, "8259 Interrupt Controller");
+		cpu->AddRegion(0x64000000, 0x6400003F, false, false, "UART");
+		cpu->AddRegion(0x68000000, 0x6800003F, false, false, "SCANPSC100F JTAG Controller");
+		cpu->AddRegion(0xC0000000, 0xC007FFFF, true,  true,  "SCSI ROM");
+		cpu->AddRegion(0xD0000000, 0xD00000FF, false, false, "SCSI (PCI device 11 BAR as programmed by firmware)");
+		cpu->AddRegion(0xF0800CF8, 0xF0800CFF, false, false, "MPC105 CONFIG_ADDR");
+		cpu->AddRegion(0xF0C00CF8, 0xF0C00CFF, false, false, "MPC105 CONFIG_DATA");
+		cpu->AddRegion(0xF8FFF000, 0xF8FFF0FF, false, false, "MPC105 Registers");
+		cpu->AddRegion(0xFF800000, 0xFFFFFFFF, true,  true,  "Flash ROM");
+
+		// Memory-mapped IO
+		static const char *uartGroup = "UART";
+		cpu->AddMappedIO(0x64000003, 1, "RBR/THR/DLL", uartGroup);
+		cpu->AddMappedIO(0x6400000B, 1, "IER/DLM",     uartGroup);
+		cpu->AddMappedIO(0x64000013, 1, "IIR/FCR",     uartGroup);
+		cpu->AddMappedIO(0x6400001B, 1, "LCR",         uartGroup);
+		cpu->AddMappedIO(0x64000023, 1, "MCR",         uartGroup);
+		cpu->AddMappedIO(0x6400002B, 1, "LSR",         uartGroup);
+		cpu->AddMappedIO(0x64000033, 1, "MSR",         uartGroup);
+		cpu->AddMappedIO(0x6400003B, 1, "SCR",         uartGroup);
+		static const char *picGroup = "8259";
+		cpu->AddMappedIO(0x54000003, 1, "ICW1/OCW2/OCW3, IRR/ISR", picGroup);
+		cpu->AddMappedIO(0x5400000B, 1, "ICW2-4/OCW1 (IMR)",       picGroup);
+		static const char *jtagGroup = "SCANPSC100F";
+		cpu->AddMappedIO(0x68000003, 1, "TDO / CNT32 reg 1",   jtagGroup);
+		cpu->AddMappedIO(0x6800000B, 1, "TDI",                 jtagGroup);
+		cpu->AddMappedIO(0x68000013, 1, "TMS0 / CNT32 reg 2",  jtagGroup);
+		cpu->AddMappedIO(0x6800001B, 1, "TMS1 / CNT32 reg 3",  jtagGroup);
+		cpu->AddMappedIO(0x68000023, 1, "CNT32 / CNT32 reg 0", jtagGroup);
+		cpu->AddMappedIO(0x6800002B, 1, "MODE0",               jtagGroup);
+		cpu->AddMappedIO(0x68000033, 1, "MODE1",               jtagGroup);
+		cpu->AddMappedIO(0x6800003B, 1, "MODE2",               jtagGroup);
+
+		return cpu;
+	}
+
+	CSupermodelDebugger::CSupermodelDebugger(::IEmulator *emu, ::CInputs *inputs, std::shared_ptr<CLogger> logger) :
+		CConsoleDebugger(), m_emu(emu), m_model3(dynamic_cast<::CModel3 *>(emu)), m_pro1000(dynamic_cast<::CPro1000 *>(emu)),
+		m_inputs(inputs), m_logger(logger),
 		m_loadEmuState(false), m_saveEmuState(false), m_resetEmu(false)
 	{
 		//
@@ -347,6 +414,17 @@ namespace Debugger
 	void CSupermodelDebugger::AddCPUs()
 	{
 		CCPUDebug *cpu;
+
+		if (m_pro1000)
+		{
+			// Pro-1000 only has a main board CPU
+			cpu = CreatePro1000CPUDebug(m_pro1000);
+			if (cpu) AddCPU(cpu);
+			return;
+		}
+
+		if (!m_model3)
+			return;
 
 		// Add main board CPU
 		cpu = CreateMainBoardCPUDebug(m_model3);
@@ -364,11 +442,13 @@ namespace Debugger
 		cpu = CreateDriveBoardCPUDebug(m_model3);
 		if (cpu) AddCPU(cpu);
 
-#ifdef NET_BOARD
+		// Add billboard CPU (if attached)
+		cpu = CreateBillBoardCPUDebug(m_model3);
+		if (cpu) AddCPU(cpu);
+
 		// Add net board CPU (if attached)
 		cpu = CreateNetBoardCPUDebug(m_model3);
 		if (cpu) AddCPU(cpu);
-#endif
 
 	}
 
@@ -441,7 +521,7 @@ namespace Debugger
 				Print("Mising input name.\n");
 				return false;
 			}
-			::CInput *input = (*m_inputs)[token];
+			std::shared_ptr<CInput> input = (*m_inputs)[token];
 			if (input == NULL)
 			{
 				Print("No input with id or label '%s'.\n", token);
@@ -472,7 +552,7 @@ namespace Debugger
 				Print("Mising input id or label.\n");
 				return false;
 			}
-			::CInput *input = (*m_inputs)[token];
+			std::shared_ptr<CInput> input = (*m_inputs)[token];
 			if (input == NULL)
 			{
 				Print("No input with id or label '%s'.\n", token);
@@ -504,7 +584,7 @@ namespace Debugger
 				Print("Mising input id or label.\n");
 				return false;
 			}
-			::CInput *input = (*m_inputs)[token];
+			std::shared_ptr<CInput> input = (*m_inputs)[token];
 			if (input == NULL)
 			{
 				Print("No input with id or label '%s'.\n", token);
@@ -530,7 +610,7 @@ namespace Debugger
 				Print("Mising input id or label.\n");
 				return false;
 			}
-			CInput *input = (*m_inputs)[token];
+			std::shared_ptr<CInput> input = (*m_inputs)[token];
 			if (input == NULL)
 			{
 				Print("No input with id or label '%s'.\n", token);
@@ -565,7 +645,7 @@ namespace Debugger
 		}
 		else if (CheckToken(token, "caip", "configallinputs"))		// configallinputs
 		{
-			m_inputs->ConfigureInputs(m_model3->GetGame());
+			m_inputs->ConfigureInputs(m_emu->GetGame());
 			return false;
 		}
 		//
@@ -575,7 +655,7 @@ namespace Debugger
 		{
 			CConsoleDebugger::ProcessToken(token, cmd);
 
-			const char *fmt = "  %-6s %-25s %s\n";
+			static const char *fmt = "  %-6s %-25s %s\n";
 			Print(" Emulator:\n");
 			Print(fmt, "les",    "loademustate",           "<filename>");
 			Print(fmt, "ses",    "saveemustate",           "<filename>");
@@ -593,9 +673,9 @@ namespace Debugger
 			return CConsoleDebugger::ProcessToken(token, cmd);
 	}
 
-	bool CSupermodelDebugger::InputIsValid(::CInput *input)
+	bool CSupermodelDebugger::InputIsValid(std::shared_ptr<CInput> input)
 	{
-		return input->IsUIInput() || (input->gameFlags & m_model3->GetGame().inputs);
+		return input->IsUIInput() || (input->gameFlags & m_emu->GetGame().inputs);
 	}
 
 	void CSupermodelDebugger::ListInputs()
@@ -609,7 +689,7 @@ namespace Debugger
 		size_t mappingWidth    = 0;
 		for (unsigned i = 0; i < m_inputs->Count(); i++)
 		{
-			::CInput *input = (*m_inputs)[i];
+			std::shared_ptr<CInput> input = (*m_inputs)[i];
 			if (!InputIsValid(input))
 				continue;
 
@@ -625,7 +705,7 @@ namespace Debugger
 		char mapping[21];
 		for (unsigned i = 0; i < m_inputs->Count(); i++)
 		{
-			::CInput *input = (*m_inputs)[i];
+			std::shared_ptr<CInput> input = (*m_inputs)[i];
 			if (!InputIsValid(input))
 				continue;
 
@@ -650,14 +730,14 @@ namespace Debugger
 		CConsoleDebugger::Attached();
 
 		char fileName[25];
-		sprintf(fileName, "Debug/%s.ds", m_model3->GetGame().name.c_str());
+		sprintf(fileName, "Debug/%s.ds", m_emu->GetGame().name.c_str());
 		LoadState(fileName);
 	}
 
 	void CSupermodelDebugger::Detaching()
 	{
 		char fileName[25];
-		sprintf(fileName, "Debug/%s.ds", m_model3->GetGame().name.c_str());
+		sprintf(fileName, "Debug/%s.ds", m_emu->GetGame().name.c_str());
 		SaveState(fileName);
 
 		CConsoleDebugger::Detaching();
@@ -685,7 +765,7 @@ namespace Debugger
 		}
 
 		// Load Model3 state
-		m_model3->LoadState(&state);
+		m_emu->LoadState(&state);
 		state.Close();
 
 		// Reset debugger
@@ -705,7 +785,7 @@ namespace Debugger
 		state.Write(&version, sizeof(version));
 
 		// Save Model3 state
-		m_model3->SaveState(&state);
+		m_emu->SaveState(&state);
 		state.Close();
 		return true;
 	}
@@ -713,7 +793,7 @@ namespace Debugger
 	void CSupermodelDebugger::ResetModel3()
 	{
 		// Reset Model3
-		m_model3->Reset();
+		m_emu->Reset();
 
 		// Reset debugger
 		Reset();
@@ -772,4 +852,4 @@ namespace Debugger
 	}
 }
 
-#endif  // SUPERMODEL_DEBUGGER
+#endif  // SUPERMODEL_DEBUGGER

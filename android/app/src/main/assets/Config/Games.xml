@@ -1,7 +1,7 @@
 <!--
   Supermodel
-  A Sega Model 3 Arcade Emulator.
-  Copyright 2003-2022 The Supermodel Team
+  A Sega Model Series Arcade Emulator.
+  Copyright 2003-2026 The Supermodel Team
 
   Games.xml
 
@@ -9,6 +9,16 @@
   load them. Do not modify this unless you really know what you're doing!
 -->
 <games>
+  <!--
+    ===========================================================================
+    Sega Model 1
+
+    Sets: netmerc, swa, swaj, vf, vr, wingwar. ROM regions are placed in the
+    V60 address space as MAME's "maincpu" region: rom_main at 200000, rom_data
+    at 1000000 (banked at 100000), rom_boot at F80000.
+    ===========================================================================
+  -->
+
   <game name="bassdx">
     <identity>
       <title>Sega Bass Fishing</title>
@@ -19,7 +29,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.0</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="fishing" />
@@ -76,7 +85,6 @@
       </region>
     </roms>
   </game>
-
   <game name="getbassdx" parent="bassdx">
     <identity>
       <title>Get Bass: Sega Bass Fishing</title>
@@ -87,7 +95,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.0</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="fishing" />
@@ -102,7 +109,6 @@
       </region>
     </roms>
   </game>
-
   <game name="getbassur" parent="bassdx">
     <identity>
       <title>Get Bass: Sega Bass Fishing</title>
@@ -113,7 +119,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.0</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="fishing" />
@@ -128,18 +133,16 @@
       </region>
     </roms>
   </game>
-
   <game name="getbass" parent="bassdx">
     <identity>
       <title>Get Bass: Sega Bass Fishing</title>
-	  <version>Japan, Standard</version>
+      <version>Japan, Standard</version>
       <manufacturer>Sega</manufacturer>
       <year>1997</year>
     </identity>
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.0</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="fishing" />
@@ -159,7 +162,6 @@
       -->
     </roms>
   </game>
-
   <game name="daytona2">
     <identity>
       <title>Daytona USA 2 - Battle on the Edge</title>
@@ -172,8 +174,8 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_status_bit_set_percent_of_frame>24</real3d_status_bit_set_percent_of_frame>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -252,11 +254,10 @@
       </region>
     </roms>
   </game>
-
   <game name="dayto2pe" parent="daytona2">
     <identity>
       <title>Daytona USA 2 - Power Edition</title>
-	  <version>Japan</version>
+      <version>Japan</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
     </identity>
@@ -266,6 +267,7 @@
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -332,7 +334,6 @@
       </region>
     </roms>
   </game>
-
   <game name="dirtdvls">
     <identity>
       <title>Dirt Devils</title>
@@ -345,7 +346,6 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -406,7 +406,6 @@
       </region>
     </roms>
   </game>
-
   <game name="dirtdvlsu" parent="dirtdvls">
     <identity>
       <title>Dirt Devils</title>
@@ -419,7 +418,6 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -438,7 +436,6 @@
       </region>
     </roms>
   </game>
-
   <game name="dirtdvlsau" parent="dirtdvls">
     <identity>
       <title>Dirt Devils</title>
@@ -451,7 +448,6 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -470,7 +466,6 @@
       </region>
     </roms>
   </game>
-
   <game name="dirtdvlsj" parent="dirtdvls">
     <identity>
       <title>Dirt Devils</title>
@@ -483,7 +478,6 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -502,7 +496,6 @@
       </region>
     </roms>
   </game>
-
   <game name="dirtdvlsg" parent="dirtdvls">
     <identity>
       <title>Dirt Devils</title>
@@ -515,7 +508,6 @@
       <stepping>2.1</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -534,7 +526,6 @@
       </region>
     </roms>
   </game>
-
   <game name="eca">
     <identity>
       <title>Emergency Call Ambulance</title>
@@ -616,7 +607,6 @@
       </region>
     </roms>
   </game>
-
   <game name="ecap" parent="eca">
     <identity>
       <title>Emergency Call Ambulance</title>
@@ -638,7 +628,7 @@
       <encryption_key>0x2923aa91</encryption_key>
     </hardware>
     <roms>
-    	<patches>
+      <patches>
         <!-- Skips over cabinet network error -->
         <patch region="crom" bits="32" offset="0x4a2b7c" value="0x60000000" />
       </patches>
@@ -663,7 +653,6 @@
       </region>
     </roms>
   </game>
-
   <game name="ecau" parent="eca">
     <identity>
       <title>Emergency Call Ambulance</title>
@@ -697,7 +686,6 @@
       </region>
     </roms>
   </game>
-
   <game name="ecaj" parent="eca">
     <identity>
       <title>Emergency Call Ambulance</title>
@@ -731,7 +719,6 @@
       </region>
     </roms>
   </game>
-
   <game name="fvipers2">
     <identity>
       <title>Fighting Vipers 2</title>
@@ -743,7 +730,6 @@
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
       <drive_board>Billboard</drive_board>
-      <real3d_status_bit_set_percent_of_frame>24</real3d_status_bit_set_percent_of_frame>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -813,18 +799,16 @@
       </region>
     </roms>
   </game>
-
   <game name="fvipers2o" parent="fvipers2">
     <identity>
       <title>Fighting Vipers 2</title>
-      <version>?</version>
+      <version>Japan</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
     </identity>
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
-      <real3d_status_bit_set_percent_of_frame>24</real3d_status_bit_set_percent_of_frame>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -842,7 +826,6 @@
       </region>
     </roms>
   </game>
-
   <game name="harley">
     <identity>
       <title>Harley-Davidson and L.A. Riders</title>
@@ -915,7 +898,6 @@
       </region>
     </roms>
   </game>
-
   <game name="harleya" parent="harley">
     <identity>
       <title>Harley-Davidson and L.A. Riders</title>
@@ -944,7 +926,6 @@
       </region>
     </roms>
   </game>
-
   <game name="lamachin">
     <identity>
       <title>L.A. Machineguns: Rage of the Machines</title>
@@ -955,7 +936,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>2.1</stepping>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <inputs>
         <input type="common" />
         <input type="analog_gun1" />
@@ -1016,7 +996,6 @@
       </region>
     </roms>
   </game>
-
   <game name="lemans24">
     <identity>
       <title>Le Mans 24</title>
@@ -1105,7 +1084,6 @@
       </region>
     </roms>
   </game>
-
   <game name="lostwsga">
     <identity>
       <title>The Lost World</title>
@@ -1116,10 +1094,11 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
-        <input type="gun1" />
-        <input type="gun2" />
+        <input type="analog_gun1" />
+        <input type="analog_gun2" />
       </inputs>
     </hardware>
     <roms>
@@ -1178,7 +1157,6 @@
       </region>
     </roms>
   </game>
-
   <game name="lostwsgp" parent="lostwsga">
     <identity>
       <title>The Lost World</title>
@@ -1190,10 +1168,11 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
-        <input type="gun1" />
-        <input type="gun2" />
+        <input type="analog_gun1" />
+        <input type="analog_gun2" />
       </inputs>
     </hardware>
     <roms>
@@ -1208,7 +1187,6 @@
       </region>
     </roms>
   </game>
-
   <game name="magtruck">
     <!-- Correct dump of Magical Truck Adventure, redumped September 2022. -->
     <identity>
@@ -1220,7 +1198,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>2.1</stepping>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <inputs>
         <input type="common" />
         <input type="magtruck" />
@@ -1229,7 +1206,7 @@
     </hardware>
     <roms>
       <patches>
-	    <!-- Enable Region change (remove the patch to return to Japan region) -->
+        <!-- Enable Region change (remove the patch to return to Japan region) -->
         <patch region="crom" bits="32" offset="0x14B25C" value="0x38600001" />
       </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
@@ -1274,7 +1251,6 @@
       </region>
     </roms>
   </game>
-
   <game name="mgtrkbad" parent="magtruck">
     <!--
       Original bad ROM set. EPROMs 18 and 20 are corrupted, causing attract
@@ -1291,7 +1267,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>2.1</stepping>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <inputs>
         <input type="common" />
         <input type="magtruck" />
@@ -1300,7 +1275,7 @@
     </hardware>
     <roms>
       <patches>
-	    <!-- Fixing bad ROM dump which causes attract mode to stop rendering -->
+        <!-- Fixing bad ROM dump which causes attract mode to stop rendering -->
         <patch region="crom" bits="32" offset="0x091A34" value="0x917F0068" />
         <!-- Enable Region change (remove the patch to return to Japan region) -->
         <patch region="crom" bits="32" offset="0x14B25C" value="0x38600001" />
@@ -1313,11 +1288,10 @@
       </region>
     </roms>
   </game>
-
   <game name="oceanhun">
     <identity>
       <title>The Ocean Hunter</title>
-	  <version>Japan, Revision A</version>
+      <version>Japan, Revision A</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
     </identity>
@@ -1384,11 +1358,10 @@
       </region>
     </roms>
   </game>
-
   <game name="oceanhuna" parent="oceanhun">
     <identity>
       <title>The Ocean Hunter</title>
-	    <version>Japan</version>
+      <version>Japan</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
     </identity>
@@ -1411,7 +1384,6 @@
       </region>
     </roms>
   </game>
-
   <game name="scud">
     <identity>
       <title>Scud Race</title>
@@ -1425,6 +1397,7 @@
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1495,7 +1468,6 @@
       </region>
     </roms>
   </game>
-
   <game name="scudau" parent="scud">
     <identity>
       <title>Scud Race</title>
@@ -1509,6 +1481,7 @@
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1529,7 +1502,6 @@
       </region>
     </roms>
   </game>
-
   <game name="scuddx" parent="scud">
     <identity>
       <title>Scud Race</title>
@@ -1543,6 +1515,7 @@
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>false</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1601,7 +1574,6 @@
       </region>
     </roms>
   </game>
-
   <game name="scuddxo" parent="scud">
     <identity>
       <title>Scud Race</title>
@@ -1614,8 +1586,8 @@
       <stepping>1.5</stepping>
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
-   <netboard>false</netboard>
-      <audio>Stereo</audio>
+      <netboard>false</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1674,7 +1646,6 @@
       </region>
     </roms>
   </game>
-
   <game name="scudplus" parent="scud">
     <identity>
       <title>Scud Race Plus</title>
@@ -1688,6 +1659,7 @@
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1720,11 +1692,10 @@
       </region>
     </roms>
   </game>
-
   <game name="scudplusa" parent="scud">
     <identity>
       <title>Scud Race Plus</title>
-	  <version>Export, Twin/DX</version>
+      <version>Export, Twin/DX</version>
       <manufacturer>Sega</manufacturer>
       <year>1997</year>
     </identity>
@@ -1733,8 +1704,8 @@
       <stepping>1.5</stepping>
       <mpeg_board>DSB1</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <pci_bridge>MPC106</pci_bridge>
       <netboard>true</netboard>
+      <audio>QuadFrontRear</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -1767,7 +1738,6 @@
       </region>
     </roms>
   </game>
-
   <game name="skichamp">
     <identity>
       <title>Ski Champ</title>
@@ -1841,11 +1811,10 @@
       </region>
     </roms>
   </game>
-
   <game name="spikeofe">
     <identity>
       <title>Spikeout Final Edition</title>
-	  <version>Export</version>
+      <version>Export</version>
       <manufacturer>Sega</manufacturer>
       <year>1999</year>
     </identity>
@@ -1928,7 +1897,6 @@
       </region>
     </roms>
   </game>
-
   <game name="spikeout">
     <identity>
       <title>Spikeout</title>
@@ -2015,11 +1983,10 @@
       </region>
     </roms>
   </game>
-
   <game name="srally2">
     <identity>
       <title>Sega Rally 2</title>
-	  <version>Export</version>
+      <version>Export</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
     </identity>
@@ -2029,6 +1996,7 @@
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
       <netboard>true</netboard>
+      <audio>QuadMix</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -2038,20 +2006,6 @@
       </inputs>
     </hardware>
     <roms>
-      <patches>
-        <!-- Old patch to bypass JTAG checks, breaks linked mode -->
-        <!--
-        <patch region="crom" bits="32" offset="0x7c0c4" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7c0c8" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7c0cc" value="0x60000000" />
-        -->
-        <!-- New patch to bypass JTAG checks -->
-        <patch region="crom" bits="32" offset="0x7b348" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7b568" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7b6b4" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7b7b0" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x7b8a8" value="0x60000000" />
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="epr-20635.20" crc32="0x7937473F" />
         <file offset="2" name="epr-20634.19" crc32="0x45A09245" />
@@ -2114,7 +2068,6 @@
       </region>
     </roms>
   </game>
-
   <game name="srally2p" parent="srally2">
     <identity>
       <title>Sega Rally 2</title>
@@ -2127,6 +2080,7 @@
       <stepping>2.0</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
+      <audio>QuadMix</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -2136,25 +2090,6 @@
       </inputs>
     </hardware>
     <roms>
-    	<patches>
-        <!-- Spindizzi notes : Not working ATM - Need correct patches for jtag stuffs -->
-        <!-- Test 1 -->
-        <!--
-        <patch region="crom" bits="32" offset="0x5bebc" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x5bec0" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x5bec4" value="0x60000000" />
-        -->
-        <!-- Test 2 -->
-        <!--
-        <patch region="crom" bits="32" offset="0x4f8d4" value="0x60000000" />
-        -->
-        <!-- Test 3 -->
-        <!--
-        <patch region="crom" bits="32" offset="0x501fc" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x50200" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x50204" value="0x60000000" />
-        -->
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="ic20.20" crc32="0x5CC4FEA1" />
         <file offset="2" name="ic19.19" crc32="0xEF8C5FD0" />
@@ -2169,7 +2104,6 @@
       </region>
     </roms>
   </game>
-
   <game name="srally2pa" parent="srally2">
     <identity>
       <title>Sega Rally 2</title>
@@ -2191,19 +2125,6 @@
       </inputs>
     </hardware>
     <roms>
-    	<patches>
-        <!-- Spindizzi notes : Not working ATM - Need correct patches for jtag stuffs -->
-        <!-- Test 1 -->
-        <!--
-        <patch region="crom" bits="32" offset="0x3ba44" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x3ba48" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x3ba4c" value="0x60000000" />
-        -->
-        <!-- Test 2 -->
-        <!--
-        <patch region="crom" bits="32" offset="0x3b10c" value="0x60000000" />
-        -->
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="prog0.20" crc32="0xA904227D" />
         <file offset="2" name="prog1.19" crc32="0xB486BB74" />
@@ -2218,7 +2139,6 @@
       </region>
     </roms>
   </game>
-
   <game name="srally2dx" parent="srally2">
     <identity>
       <title>Sega Rally 2</title>
@@ -2235,7 +2155,7 @@
       <stepping>2.0</stepping>
       <mpeg_board>DSB2</mpeg_board>
       <drive_board>Wheel</drive_board>
-      <real3d_status_bit_set_percent_of_frame>48</real3d_status_bit_set_percent_of_frame>
+      <audio>QuadMix</audio>
       <inputs>
         <input type="common" />
         <input type="vehicle" />
@@ -2245,18 +2165,6 @@
       </inputs>
     </hardware>
     <roms>
-      <patches>
-        <!--
-          Base offset of program in CROM space: 0 (lines up perfectly with RAM
-          offsets). The game gets stuck in a region of code that appears to
-          wait on some exception to occur. It also appears to access the
-          tilegen space, indicating that this is perhaps related to frame
-          timing and IRQs (pure speculation; I haven't really looked at it).
-          Multiple places can be patched out - another one that works is
-          0x66ae0.
-        -->
-        <patch region="crom" bits="32" offset="0x66aa8" value="0x60000000" />
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="epr-20505.20" crc32="0xC24A5097" />
         <file offset="2" name="epr-20504.19" crc32="0x30BBC46D" />
@@ -2305,9 +2213,18 @@
         <file offset="0x000000" name="mpr-20484.22" crc32="0x8AC3FBC4" />
         <file offset="0x400000" name="mpr-20485.24" crc32="0xCFD8C19B" />
       </region>
+      <!-- DSB2 ROMs not dumped: the Twin's, when they are there -->
+      <region name="mpeg_program" stride="1" chunk_size="1" byte_swap="true" required="false" merge="false">
+        <file offset="0" name="epr-20641.2" crc32="0xC9B82035" />
+      </region>
+      <region name="mpeg_music" stride="1" chunk_size="1" required="false" merge="false">
+        <file offset="0x000000" name="mpr-20637.57" crc32="0xD66E8A02" />
+        <file offset="0x400000" name="mpr-20638.58" crc32="0xD1513382" />
+        <file offset="0x800000" name="mpr-20639.59" crc32="0xF6603B7B" />
+        <file offset="0xC00000" name="mpr-20640.60" crc32="0x9EEA07B7" />
+      </region>
     </roms>
   </game>
-
   <game name="swtrilgy">
     <identity>
       <title>Star Wars Trilogy Arcade</title>
@@ -2327,18 +2244,6 @@
       <encryption_key>0x31272A01</encryption_key>
     </hardware>
     <roms>
-      <patches>
-        <!-- skip force feedback lever check -->
-        <!-- <patch region="crom" bits="32" offset="0xf6e44" value="0x60000000" /> --> <!-- from MAME -->
-        <!--<patch region="crom" bits="32" offset="0xf0e48" value="0x60000000" /> --> <!-- no more needed if ffb lever rom loaded -->
-        <!--<patch region="crom" bits="32" offset="0x043dc" value="0x48000090" /> --> <!-- related to joystick feedback --> <!-- no more needed if ffb lever rom loaded -->
-        <patch region="crom" bits="32" offset="0x029a0" value="0x60000000" /> <!-- skip force feedback setup? -->
-        <patch region="crom" bits="32" offset="0x02a0c" value="0x60000000" />
-        <!-- Additional patches from MAME for test menu -->
-        <patch region="crom" bits="32" offset="0xf776c" value="0x60000000" /> <!-- unemulated JTAG stuff -->
-        <patch region="crom" bits="32" offset="0xf7770" value="0x60000000" /> <!-- "" -->
-        <patch region="crom" bits="32" offset="0xf7774" value="0x60000000" /> <!-- "" -->
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="epr-21382a.20" crc32="0x69BAF117" />
         <file offset="2" name="epr-21381a.19" crc32="0x2DD34E28" />
@@ -2402,11 +2307,10 @@
       </region>
     </roms>
   </game>
-
   <game name="swtrilgya" parent="swtrilgy">
     <identity>
       <title>Star Wars Trilogy Arcade</title>
-	  <version>Export</version>
+      <version>Export</version>
       <manufacturer>Sega, LucasArts</manufacturer>
       <year>1998</year>
     </identity>
@@ -2422,20 +2326,6 @@
       <encryption_key>0x31272A01</encryption_key>
     </hardware>
     <roms>
-      <patches>
-        <!-- skip force feedback lever check -->
-        <!--<patch region="crom" bits="32" offset="0xf6dd0" value="0x60000000" /> --> <!-- from MAME -->
-        <!-- Spindizzi notes : mimic patch from Bart's patch in swtrilgy to prevent game to be slow-->
-        <!-- instead of patch we can make hack timing in code -->
-        <!--<patch region="crom" bits="32" offset="0x043dc" value="0x48000090" />--> <!-- no more needed if ffb lever rom loaded -->
-        <patch region="crom" bits="32" offset="0x029a0" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x02a0c" value="0x60000000" />
-        <!--<patch region="crom" bits="32" offset="0xf0dd4" value="0x60000000" />--> <!-- no more needed if ffb lever rom loaded -->
-        <!-- Additional patches from MAME for test menu -->
-        <patch region="crom" bits="32" offset="0xf76f8" value="0x60000000" /> <!-- unemulated JTAG stuff -->
-        <patch region="crom" bits="32" offset="0xf76fc" value="0x60000000" /> <!-- "" -->
-        <patch region="crom" bits="32" offset="0xf7700" value="0x60000000" /> <!-- "" -->
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="epr-21382.20" crc32="0x0B9C44A0" />
         <file offset="2" name="epr-21381.19" crc32="0xBB5757BF" />
@@ -2444,11 +2334,10 @@
       </region>
     </roms>
   </game>
-
   <game name="swtrilgyp" parent="swtrilgy">
     <identity>
       <title>Star Wars Trilogy Arcade</title>
-	  <version>Location Test, 16.09.98</version>
+      <version>Location Test, 16.09.98</version>
       <manufacturer>Sega, LucasArts</manufacturer>
       <year>1998</year>
     </identity>
@@ -2464,26 +2353,13 @@
       <encryption_key>0x31272A01</encryption_key>
     </hardware>
     <roms>
-      <patches>
-        <!-- obsolete patches -->
-        <!-- 0x87db8 = 0x60000000 patch from Mame -->
-        <!-- 0x04184 = 0x480000AC no more needed if ffb lever rom loaded -->
-        <!-- 0x8391c = 0x60000000 no more needed if ffb lever rom loaded -->
-        <!-- related to force feedback setup -->
-        <patch region="crom" bits="32" offset="0x0292c" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x02998" value="0x60000000" />
-        <!-- unemulated JTAG stuff : enable service menu -->
-        <patch region="crom" bits="32" offset="0x886e0" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x886e4" value="0x60000000" />
-        <patch region="crom" bits="32" offset="0x886e8" value="0x60000000" />
-      </patches>
       <region name="crom" stride="8" chunk_size="2" byte_swap="true">
         <file offset="0" name="epr-crom0.20" crc32="0xDA7D49FA" />
         <file offset="2" name="epr-crom1.19" crc32="0x322B67A5" />
         <file offset="4" name="epr-crom2.18" crc32="0xE4147534" />
         <file offset="6" name="epr-crom3.17" crc32="0x84734E94" />
       </region>
-      <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true">
+      <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true" merge="false">
         <!-- CROM0 -->
         <file offset="0x0000000" name="epr-crom00.04" crc32="0xDC0D974D" />
         <file offset="0x0000002" name="epr-crom01.03" crc32="0x4D13685D" />
@@ -2522,7 +2398,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vf3">
     <identity>
       <title>Virtua Fighter 3</title>
@@ -2600,7 +2475,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vf3a" parent="vf3">
     <identity>
       <title>Virtua Fighter 3</title>
@@ -2628,7 +2502,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vf3c" parent="vf3">
     <identity>
       <title>Virtua Fighter 3</title>
@@ -2656,11 +2529,10 @@
       </region>
     </roms>
   </game>
-
   <game name="vf3tb" parent="vf3">
     <identity>
       <title>Virtua Fighter 3 Team Battle</title>
-	  <version>Japan</version>
+      <version>Japan</version>
       <manufacturer>Sega</manufacturer>
       <year>1996</year>
     </identity>
@@ -2691,10 +2563,9 @@
       </region>
     </roms>
   </game>
-
   <game name="von2">
     <identity>
-      <title>Virtual On 2: Oratorio Tangram</title>
+      <title>Cyber Troopers Virtual-On Oratorio Tangram</title>
       <version>Japan, Revision B</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
@@ -2703,7 +2574,6 @@
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
       <drive_board>Billboard</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -2772,10 +2642,9 @@
       </region>
     </roms>
   </game>
-
   <game name="von254g" parent="von2">
     <identity>
-      <title>Virtual On 2: Oratorio Tangram</title>
+      <title>Cyber Troopers Virtual-On Oratorio Tangram</title>
       <version>Japan, Ver 5.4g</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
@@ -2784,7 +2653,6 @@
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
       <drive_board>Billboard</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -2801,10 +2669,9 @@
       </region>
     </roms>
   </game>
-
   <game name="von2a" parent="von2">
     <identity>
-      <title>Virtual On 2: Oratorio Tangram</title>
+      <title>Cyber Troopers Virtual-On Oratorio Tangram</title>
       <version>Japan, Revision A</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
@@ -2813,7 +2680,6 @@
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
       <drive_board>Billboard</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -2830,10 +2696,9 @@
       </region>
     </roms>
   </game>
-
   <game name="von2o" parent="von2">
     <identity>
-      <title>Virtual On 2: Oratorio Tangram</title>
+      <title>Cyber Troopers Virtual-On Oratorio Tangram</title>
       <version>Japan</version>
       <manufacturer>Sega</manufacturer>
       <year>1998</year>
@@ -2842,7 +2707,6 @@
       <platform>Sega Model 3</platform>
       <stepping>2.0</stepping>
       <drive_board>Billboard</drive_board>
-      <real3d_pci_id>0x16C311DB</real3d_pci_id>
       <netboard>true</netboard>
       <inputs>
         <input type="common" />
@@ -2859,7 +2723,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs2">
     <identity>
       <title>Virtua Striker 2</title>
@@ -2937,7 +2800,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs215" parent="vs2">
     <identity>
       <title>Virtua Striker 2</title>
@@ -2949,7 +2811,6 @@
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
       <drive_board>Billboard</drive_board>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -2966,7 +2827,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs215o" parent="vs2">
     <!-- locked to Japan, test or debug version with render/CPU data displayed on screen -->
     <identity>
@@ -2979,7 +2839,6 @@
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
       <drive_board>Billboard</drive_board>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -2996,7 +2855,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs298">
     <identity>
       <title>Virtua Striker 2 '98</title>
@@ -3017,7 +2875,7 @@
       <encryption_key>0x29234e96</encryption_key>
     </hardware>
     <roms>
-    	<patches>
+      <patches>
         <!--
           Offset of program relative to CROM base: 0x600000 (0x200000 in the
           ROM itself). Inexplicably, at PC=AFC1C, a call is made to FC78, which
@@ -3033,7 +2891,7 @@
         <file offset="0" name="epr-20920.20" crc32="0x428D05FC" />
         <file offset="2" name="epr-20919.19" crc32="0x7A0713D2" />
         <file offset="4" name="epr-20918.18" crc32="0x0E9CDC5B" />
-        <file offset="6" name="epr-20917.17" crc32="0xC3BBB270" />
+        <file offset="6" name="epr-20917.17" crc32="0x969E4BDA" />
       </region>
       <region name="banked_crom" stride="8" chunk_size="2" byte_swap="true">
         <!-- CROM0 -->
@@ -3087,7 +2945,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs29815" parent="vs298">
     <identity>
       <title>Virtua Striker 2 '98</title>
@@ -3099,7 +2956,6 @@
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
       <drive_board>Billboard</drive_board>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -3116,7 +2972,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99.1</title>
@@ -3195,7 +3050,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs299a" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99</title>
@@ -3224,11 +3078,10 @@
       </region>
     </roms>
   </game>
-
   <game name="vs299" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99</title>
-	  <version>Export, USA</version>
+      <version>Export, USA</version>
       <manufacturer>Sega</manufacturer>
       <year>1999</year>
     </identity>
@@ -3253,7 +3106,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs299j" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99.1</title>
@@ -3282,7 +3134,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs29915" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99.1</title>
@@ -3294,7 +3145,6 @@
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
       <drive_board>Billboard</drive_board>
-      <pci_bridge>MPC106</pci_bridge>
       <inputs>
         <input type="common" />
         <input type="joystick1" />
@@ -3311,7 +3161,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs29915a" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99</title>
@@ -3322,7 +3171,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <drive_board>Billboard</drive_board>
       <inputs>
         <input type="common" />
@@ -3340,7 +3188,6 @@
       </region>
     </roms>
   </game>
-
   <game name="vs29915j" parent="vs2v991">
     <identity>
       <title>Virtua Striker 2 '99.1</title>
@@ -3351,7 +3198,6 @@
     <hardware>
       <platform>Sega Model 3</platform>
       <stepping>1.5</stepping>
-      <pci_bridge>MPC106</pci_bridge>
       <drive_board>Billboard</drive_board>
       <inputs>
         <input type="common" />

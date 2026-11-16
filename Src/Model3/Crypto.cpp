@@ -1,6 +1,6 @@
 /**
  ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
+ ** A Sega Model Series Arcade Emulator.
  ** Copyright 2011-2016 Bart Trzynadlowski, Nik Henson 
  **
  ** This file is part of Supermodel.
@@ -24,10 +24,12 @@
  *
  * Security board encryption device emulation. This code was taken from MAME
  * (http://mamedev.org).
+ *
+ * Based on original work by Andreas Naive, Olivier Galibert and David Haywood
+ * in MAME. Portions Copyright (c) Andreas Naive, Olivier Galibert and David
+ * Haywood, used under the BSD 3-Clause License: see Docs/README.txt.
  */
  
-// license:BSD-3-Clause
-// copyright-holders:Andreas Naive, Olivier Galibert, David Haywood
 /*
   re: Tecmo World Cup '98 (ST-V) (from ANY)
 
@@ -139,16 +141,11 @@ void CCrypto::LoadState(CBlockFile *SaveState)
 
 void CCrypto::Init(uint32_t encryptionKey, std::function<uint16_t(uint32_t)> ReadRAMCallback)
 {
-  /*
 	buffer = std::make_unique<UINT8[]>(BUFFER_SIZE);
 	line_buffer = std::make_unique<UINT8[]>(LINE_SIZE);
 	line_buffer_prev = std::make_unique<UINT8[]>(LINE_SIZE);
-	*/
-  buffer = std::unique_ptr<UINT8[]>{ new UINT8[BUFFER_SIZE] };
-  line_buffer = std::unique_ptr<UINT8[]>{ new UINT8[LINE_SIZE] };
-  line_buffer_prev = std::unique_ptr<UINT8[]>{ new UINT8[LINE_SIZE] };
 
-  m_read = ReadRAMCallback;
+	m_read = ReadRAMCallback;
 	//m_read.bind_relative_to(*owner());
 
 /*
@@ -165,7 +162,7 @@ void CCrypto::Init(uint32_t encryptionKey, std::function<uint16_t(uint32_t)> Rea
 	save_item(NAME(line_buffer_size));
 */
 
-  key = encryptionKey;
+	key = encryptionKey;
 }
 
 void CCrypto::Reset()

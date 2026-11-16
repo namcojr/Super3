@@ -94,12 +94,7 @@
 
 /* signed and unsigned int must be at least 32 bits wide */
 #define sint   signed   int
-#if defined(__ANDROID__)
-/* sys/types.h already typedefs uint on Android; avoid redefining it as a macro. */
-typedef unsigned int uint;
-#else
 #define uint   unsigned int
-#endif
 
 
 #if M68K_USE_64_BIT

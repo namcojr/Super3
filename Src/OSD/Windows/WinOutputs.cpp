@@ -18,7 +18,7 @@
  ** You should have received a copy of the GNU General Public License along
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
- 
+
 /*
  * WinOutputs.cpp
  */
@@ -47,9 +47,16 @@
 
 bool CWinOutputs::s_createdClass = false;
 
-CWinOutputs::CWinOutputs() : m_hwnd(NULL)
+CWinOutputs::CWinOutputs() : 
+	m_hwnd(nullptr),
+	m_onStart(0),
+	m_onStop(0),
+	m_updateState(0),
+	m_regClient(0),
+	m_unregClient(0),
+	m_getIdString(0)
+
 {
-	//
 }
 
 CWinOutputs::~CWinOutputs()
@@ -108,11 +115,14 @@ void CWinOutputs::Attached()
 void CWinOutputs::SendOutput(EOutputs output, UINT8 prevValue, UINT8 value)
 {
 	//printf("LAMP OUTPUT %s = %u -> %u\n", GetOutputName(output), prevValue, value);
-	
+	// Called with m_mutex held (COutputs::SetValue)
+
 	// Loop through all registered clients and send them new output value
 	LPARAM param = (LPARAM)output + 1;
-	for (vector<RegisteredClient>::iterator it = m_clients.begin(), end = m_clients.end(); it != end; ++it)
-		PostMessage(it->hwnd, m_updateState, param, value);
+	for (auto& client : m_clients) {
+		PostMessage(client.hwnd, m_updateState, param, value);
+	}
+
 }
 
 LRESULT CALLBACK CWinOutputs::OutputWindowProcCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -130,7 +140,7 @@ bool CWinOutputs::CreateWindowClass()
 		return true;
 
 	// Setup description of window class
-	WNDCLASS wc = { 0 };
+	WNDCLASS wc{};
 	wc.lpszClassName = OUTPUT_WINDOW_CLASS;
 	wc.hInstance = GetModuleHandle(NULL);
 	wc.lpfnWndProc = OutputWindowProcCallback;
@@ -141,7 +151,7 @@ bool CWinOutputs::CreateWindowClass()
 		s_createdClass = true;
 		return true;
 	}
-	
+
 	return false;
 }
 bool CWinOutputs::DeleteWindowClass()
@@ -177,21 +187,22 @@ LRESULT CWinOutputs::OutputWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 LRESULT CWinOutputs::RegisterClient(HWND hwnd, LPARAM id)
 {
-	// Check that given client is not already registered
-	for (vector<RegisteredClient>::iterator it = m_clients.begin(), end = m_clients.end(); it != end; ++it)
-	{
-		if (it->id == id)
-		{
-			it->hwnd = hwnd;
+	std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-			// If so, just send it current state of all outputs
-			SendAllToClient(*it);
+	// Check that given client is not already registered
+	for (auto& client : m_clients)
+	{
+		if (client.id == id)
+		{
+			client.hwnd = hwnd;
+			SendAllToClient(client);
 			return 1;
 		}
 	}
 
+
 	// If not, store details about client and send it current state of all outputs
-	RegisteredClient client;
+	RegisteredClient client{};
 	client.id = id;
 	client.hwnd = hwnd;
 	m_clients.push_back(client);
@@ -213,9 +224,11 @@ void CWinOutputs::SendAllToClient(RegisteredClient &client)
 
 LRESULT CWinOutputs::UnregisterClient(HWND hwnd, LPARAM id)
 {
+	std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
 	// Find any matching clients and remove them
 	bool found = false;
-	vector<RegisteredClient>::iterator it = m_clients.begin();
+	auto it = m_clients.begin();
 	while (it != m_clients.end())
 	{
 		if (it->id == id)
@@ -239,17 +252,17 @@ LRESULT CWinOutputs::SendIdString(HWND hwnd, LPARAM id)
 		name = GetGame().name;
 	else
 		name = MapIdToName(id) ? MapIdToName(id) : "";
-	
+
 	// Allocate memory for message
-	int dataLen = sizeof(CopyDataIdString) + name.length();
-	CopyDataIdString *data = (CopyDataIdString*)new(nothrow) UINT8[dataLen];
+	DWORD dataLen = sizeof(CopyDataIdString) + (DWORD)name.length();
+	CopyDataIdString *data = (CopyDataIdString*)new(std::nothrow) UINT8[dataLen];
 	if (!data)
 		return 1;
-	data->id = id;
+	data->id = (UINT32)id;
 	strcpy(data->string, name.c_str());
 
 	// Reply by using SendMessage with WM_COPYDATA
-	COPYDATASTRUCT copyData;
+	COPYDATASTRUCT copyData{};
 	copyData.dwData = COPYDATA_MESSAGE_ID_STRING;
 	copyData.cbData = dataLen;
 	copyData.lpData = data;

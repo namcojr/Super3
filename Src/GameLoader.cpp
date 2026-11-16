@@ -1,3 +1,23 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #include "GameLoader.h"
 #include "OSD/Logger.h"
 #include "Util/NewConfig.h"
@@ -5,6 +25,8 @@
 #include "Util/ByteSwap.h"
 #include "Util/Format.h"
 #include <algorithm>
+#include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 
@@ -89,7 +111,7 @@ const GameLoader::ZippedFile *GameLoader::LookupFile(const File::ptr_t &file, co
   return nullptr;
 }
 
-bool GameLoader::LoadZippedFile(std::shared_ptr<uint8_t> *buffer, size_t *file_size, const GameLoader::File::ptr_t &file, const ZipArchive &zip) const
+bool GameLoader::LoadZippedFile(std::shared_ptr<uint8_t> *buffer, uint32_t *file_size, const GameLoader::File::ptr_t &file, const ZipArchive &zip) const
 {
   // Locate file
   const ZippedFile *zipped_file = LookupFile(file, zip);
@@ -109,7 +131,7 @@ bool GameLoader::LoadZippedFile(std::shared_ptr<uint8_t> *buffer, size_t *file_s
   }
   *file_size = zipped_file->uncompressed_size;
   buffer->reset(new uint8_t[*file_size], std::default_delete<uint8_t[]>());
-  size_t bytes_read = (size_t) unzReadCurrentFile(zipped_file->zf, buffer->get(), *file_size);
+  auto bytes_read = unzReadCurrentFile(zipped_file->zf, buffer->get(), *file_size);
   if (bytes_read != *file_size)
   {
     ErrorLog("Unable to read '%s' from '%s'. Is zip file corrupt?", zipped_file->filename.c_str(), zipped_file->zipfilename.c_str());
@@ -135,7 +157,11 @@ bool GameLoader::MissingAttrib(const GameLoader &loader, const Util::Config::Nod
 
 GameLoader::File::ptr_t GameLoader::File::Create(const GameLoader &loader, const Util::Config::Node &file_node)
 {
-  if (GameLoader::MissingAttrib(loader, file_node, "name") | GameLoader::MissingAttrib(loader, file_node, "offset")) // no || to easier detect errors
+  // Evaluate separately (not in a single expression) to avoid short-circuit evaluation,
+  // ensuring all missing attributes are detected and reported.
+  bool missingName = GameLoader::MissingAttrib(loader, file_node, "name");
+  bool missingOffset = GameLoader::MissingAttrib(loader, file_node, "offset");
+  if (missingName || missingOffset)
     return ptr_t();
   ptr_t file = std::make_shared<File>();
   file->offset = file_node["offset"].ValueAs<uint32_t>();
@@ -159,20 +185,76 @@ bool GameLoader::File::operator==(const File &rhs) const
 
 GameLoader::Region::ptr_t GameLoader::Region::Create(const GameLoader &loader, const Util::Config::Node &region_node)
 {
-  if (GameLoader::MissingAttrib(loader, region_node, "name") | MissingAttrib(loader, region_node, "stride") | GameLoader::MissingAttrib(loader, region_node, "chunk_size")) // no || to easier detect errors
+  // Evaluate separately (not in a single expression) to avoid short-circuit evaluation,
+  // ensuring all missing attributes are detected and reported.
+  bool missingName = GameLoader::MissingAttrib(loader, region_node, "name");
+  bool missingStride = MissingAttrib(loader, region_node, "stride");
+  bool missingChunkSize = GameLoader::MissingAttrib(loader, region_node, "chunk_size");
+  if (missingName || missingStride || missingChunkSize)
     return ptr_t();
+
+  if (region_node["byte_swap"].Exists() && region_node["byte_layout"].Exists())
+  {
+    ErrorLog("%s: '%s' region has both 'byte_swap' and 'byte_layout' attributes. Use one or the other.", loader.m_xml_filename.c_str(), region_node["name"].Value<std::string>().c_str());
+    return ptr_t();
+  }
+
   ptr_t region = std::make_shared<Region>();
+
   region->region_name = region_node["name"].Value<std::string>();
-  region->stride = region_node["stride"].ValueAs<size_t>();
-  region->chunk_size = region_node["chunk_size"].ValueAs<size_t>();
-  region->byte_swap = region_node["byte_swap"].ValueAsDefault<bool>(false);
+
+  region->stride = region_node["stride"].ValueAs<uint32_t>();
+  if (region->stride == 0)
+  {
+    ErrorLog("%s: '%s' stride length must be greater than 0.", loader.m_xml_filename.c_str(), region->region_name.c_str());
+    return ptr_t();
+  }
+
+  region->chunk_size = region_node["chunk_size"].ValueAs<uint32_t>();
+  if (region->chunk_size == 0)
+  {
+    ErrorLog("%s: '%s' chunk size must be greater than 0.", loader.m_xml_filename.c_str(), region->region_name.c_str());
+    return ptr_t();
+  }
+
   region->required = region_node["required"].ValueAsDefault<bool>(true);
+  region->merge = region_node["merge"].ValueAsDefault<bool>(true);
+
+  // Byte layout. If byte_swap was specified, construct the byte swapped layout string based on
+  // stride size. If byte_swap is set to false, empty layout string is fine.
+  if (region_node["byte_swap"].Exists())
+  {
+    if (region_node["byte_swap"].ValueAs<bool>())
+    {
+      // Special case: if chunk size and stride are both 1, change them both to 2 so we can allow byte
+      // swapping (these values are used for singular ROMs that don't need to be merged; technically,
+      // the stride and chunk size should be 2 since they are 16-bit ROMs).
+      if (region->stride == 1 && region->chunk_size == 1)
+      {
+        region->stride = 2;
+        region->chunk_size = 2;
+      }
+
+      std::string byte_layout;
+      for (uint32_t i = 0; i < region->stride; i++)
+      {
+        byte_layout += '0' + char(i ^ 1);
+      }
+      region->byte_layout = byte_layout;
+    }
+  }
+  else
+  {
+    region->byte_layout = region_node["byte_layout"].ValueAsDefault<std::string>(std::string());
+
+  }
+
   return region;
 }
 
 bool GameLoader::Region::AttribsMatch(const ptr_t &other) const
 {
-  return stride == other->stride && chunk_size == other->chunk_size && byte_swap == other->byte_swap;
+  return stride == other->stride && chunk_size == other->chunk_size && byte_layout == other->byte_layout;
 }
 
 bool GameLoader::Region::FindFileIndexByOffset(size_t *idx, uint32_t offset) const
@@ -188,7 +270,8 @@ bool GameLoader::Region::FindFileIndexByOffset(size_t *idx, uint32_t offset) con
   return false;
 }
 
-static void PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
+// Returns false if the game is not valid (prints the error)
+static bool PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
 {
   game->name = game_node["name"].ValueAs<std::string>();
   game->parent = game_node["parent"].ValueAsDefault<std::string>("");
@@ -196,8 +279,71 @@ static void PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
   game->version = game_node["identity/version"].ValueAsDefault<std::string>("");
   game->manufacturer = game_node["identity/manufacturer"].ValueAsDefault<std::string>("Unknown");
   game->year = game_node["identity/year"].ValueAsDefault<unsigned>(0);
-  game->stepping = game_node["hardware/stepping"].ValueAsDefault<std::string>("");
-  game->mpeg_board = game_node["hardware/mpeg_board"].ValueAsDefault<std::string>("");
+  game->polygon_memory = game_node["hardware/polygon_memory"].ValueAsDefault<unsigned>(0);
+  std::map<std::string, Game::Platform> platforms
+  {
+    { "",                 Game::PLATFORM_MODEL3 },  // default to Model 3
+    { "Sega Model 3",     Game::PLATFORM_MODEL3 },
+    { "Real3D PRO-1000",  Game::PLATFORM_PRO1000 },
+    { "Sega Model 1",     Game::PLATFORM_MODEL1 },
+    { "Sega Model 2",     Game::PLATFORM_MODEL2 }
+  };
+  std::string platform = game_node["hardware/platform"].ValueAsDefault<std::string>("");
+  if (platforms.find(platform) == platforms.end())
+    ErrorLog("Unknown platform '%s' for '%s'. Defaulting to Sega Model 3.", platform.c_str(), game->name.c_str());
+  game->platform = platforms[platform];
+  // The stepping must be a stepping of the platform. The PRO-1000 default is
+  // the PRO-1100 and the Model 2 default is the Model 2A.
+  std::map<std::string, Game::Stepping> model3_steppings
+  {
+    { "1.0",  Game::Stepping::MODEL3_1_0 },
+    { "1.5",  Game::Stepping::MODEL3_1_5 },
+    { "2.0",  Game::Stepping::MODEL3_2_0 },
+    { "2.1",  Game::Stepping::MODEL3_2_1 }
+  };
+  std::map<std::string, Game::Stepping> pro1000_steppings
+  {
+    { "",     Game::Stepping::PRO1000_1100 },
+    { "1100", Game::Stepping::PRO1000_1100 },
+    { "1200", Game::Stepping::PRO1000_1200 },
+    { "1400", Game::Stepping::PRO1000_1400 }
+  };
+  std::map<std::string, Game::Stepping> model1_steppings
+  {
+    { "",     Game::Stepping::MODEL1 }
+  };
+  std::map<std::string, Game::Stepping> model2_steppings
+  {
+    { "",     Game::Stepping::MODEL2A },
+    { "2",    Game::Stepping::MODEL2 },
+    { "2A",   Game::Stepping::MODEL2A },
+    { "2B",   Game::Stepping::MODEL2B },
+    { "2C",   Game::Stepping::MODEL2C }
+  };
+  bool pro1000 = game->platform == Game::PLATFORM_PRO1000;
+  bool model1 = game->platform == Game::PLATFORM_MODEL1;
+  bool model2 = game->platform == Game::PLATFORM_MODEL2;
+  const auto &steppings = model2 ? model2_steppings : model1 ? model1_steppings : pro1000 ? pro1000_steppings : model3_steppings;
+  std::string stepping = game_node["hardware/stepping"].ValueAsDefault<std::string>("");
+  auto stepping_it = steppings.find(stepping);
+  if (stepping_it == steppings.end())
+  {
+    ErrorLog("Stepping '%s' of '%s' is not a %s stepping (%s). Ignoring this game.", stepping.c_str(), game->name.c_str(),
+             model2 ? "Sega Model 2" : model1 ? "Sega Model 1" : pro1000 ? "Real3D PRO-1000" : "Sega Model 3",
+             model2 ? "2, 2A, 2B, or 2C" : model1 ? "none" : pro1000 ? "1100, 1200, or 1400" : "1.0, 1.5, 2.0, or 2.1");
+    return false;
+  }
+  game->stepping = stepping_it->second;
+  std::map<std::string, Game::MpegBoardType> mpeg_board_types
+  {
+    { "",     Game::MPEG_BOARD_NONE },
+    { "DSB1", Game::MPEG_BOARD_DSB1 },
+    { "DSB2", Game::MPEG_BOARD_DSB2 }
+  };
+  std::string mpeg_board_type = game_node["hardware/mpeg_board"].ValueAsDefault<std::string>("");
+  if (mpeg_board_types.find(mpeg_board_type) == mpeg_board_types.end())
+    ErrorLog("Unknown MPEG board type '%s' for '%s'. Only 'DSB1' and 'DSB2' are supported.", mpeg_board_type.c_str(), game->name.c_str());
+  game->mpeg_board = mpeg_board_types[mpeg_board_type];
   std::map<std::string, Game::AudioTypes> audio_types
   {
     { "",                      Game::STEREO_LR }, // default to stereo
@@ -212,9 +358,6 @@ static void PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
   };
   std::string audio_type = game_node["hardware/audio"].ValueAsDefault<std::string>("");
   game->audio = audio_types[audio_type];
-  game->pci_bridge = game_node["hardware/pci_bridge"].ValueAsDefault<std::string>("");
-  game->real3d_pci_id = game_node["hardware/real3d_pci_id"].ValueAsDefault<uint32_t>(0);
-  game->real3d_status_bit_set_percent_of_frame = game_node["hardware/real3d_status_bit_set_percent_of_frame"].ValueAsDefault<float>(0);
   game->encryption_key = game_node["hardware/encryption_key"].ValueAsDefault<uint32_t>(0);
   game->netboard_present = game_node["hardware/netboard"].ValueAsDefault<bool>(false);
 
@@ -241,7 +384,10 @@ static void PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
     { "analog_gun2",      Game::INPUT_ANALOG_GUN2 },
     { "ski",              Game::INPUT_SKI },
     { "magtruck",         Game::INPUT_MAGTRUCK },
-    { "fishing",          Game::INPUT_FISHING }
+    { "fishing",          Game::INPUT_FISHING },
+    { "throttle",         Game::INPUT_THROTTLE },
+    { "analog_joystick2", Game::INPUT_ANALOG_JOYSTICK2 },
+    { "flight_view4",     Game::INPUT_FLIGHT_VIEW4 }
   };
   for (auto &node: game_node["hardware/inputs"])
   {
@@ -257,10 +403,12 @@ static void PopulateGameInfo(Game *game, const Util::Config::Node &game_node)
     { "Wheel",      Game::DRIVE_BOARD_WHEEL },
     { "Joystick",   Game::DRIVE_BOARD_JOYSTICK },
     { "Ski",        Game::DRIVE_BOARD_SKI },
-    { "Billboard",  Game::DRIVE_BOARD_BILLBOARD}
+    { "Billboard",  Game::DRIVE_BOARD_BILLBOARD},
+    { "Motion",     Game::DRIVE_BOARD_MOTION}
   };
   std::string drive_board_type = game_node["hardware/drive_board"].ValueAsDefault<std::string>(std::string());
   game->driveboard_type = drive_board_types[drive_board_type];
+  return true;
 }
 
 bool GameLoader::LoadGamesFromXML(const Util::Config::Node &xml)
@@ -288,9 +436,14 @@ bool GameLoader::LoadGamesFromXML(const Util::Config::Node &xml)
         ErrorLog("%s: Ignoring redefinition of game '%s'.", m_xml_filename.c_str(), game_name.c_str());
         continue;
       }
+      m_game_order.emplace(game_name, m_game_order.size());
+      if (!PopulateGameInfo(&m_game_info_by_game[game_name], game_node))
+      {
+        m_game_info_by_game.erase(game_name);
+        continue;
+      }
       RegionsByName_t &regions_by_name = m_regions_by_game[game_name];
       PatchesByRegion_t &patches_by_region = m_patches_by_game[game_name];
-      PopulateGameInfo(&m_game_info_by_game[game_name], game_node);
 
       for (auto &roms_node: game_node)
       {
@@ -312,8 +465,8 @@ bool GameLoader::LoadGamesFromXML(const Util::Config::Node &xml)
 
           // Look up region structure or create new one if needed
           std::string region_name = region_node["name"].Value<std::string>();
-          auto it = regions_by_name.find(region_name);
-          Region::ptr_t region = (it != regions_by_name.end()) ? it->second : Region::Create(*this, region_node);
+          auto it2 = regions_by_name.find(region_name);
+          Region::ptr_t region = (it2 != regions_by_name.end()) ? it2->second : Region::Create(*this, region_node);
           if (!region)
             continue;
 
@@ -333,8 +486,9 @@ bool GameLoader::LoadGamesFromXML(const Util::Config::Node &xml)
             files.push_back(file);
           }
 
-          // Check to ensure that some files were defined in the region
-          if (files.empty())
+          // Check to ensure that some files were defined in the region (a
+          // child's unmerged region may have none: it removes the parent's)
+          if (files.empty() && region->merge)
             ErrorLog("%s: No files defined in region '%s' of '%s'.", m_xml_filename.c_str(), region->region_name.c_str(), game_name.c_str());
           else
             regions_by_name[region->region_name] = region;
@@ -381,7 +535,7 @@ bool GameLoader::LoadGamesFromXML(const Util::Config::Node &xml)
 
 static bool IsChildSet(const Game &game)
 {
-  return game.parent.length() > 0;
+  return !game.parent.empty();
 }
 
 bool GameLoader::MergeChildrenWithParents()
@@ -402,9 +556,21 @@ bool GameLoader::MergeChildrenWithParents()
     RegionsByName_t new_regions;
     for (auto &v2: parent_regions)
     {
+      auto &region_name = v2.first;
+
+      // A child region with merge="false" replaces the parent's region
+      // entirely (as in a non-merged ROM set, which has only the child's own
+      // files), or removes it if it has no files
+      auto child_it = child_regions.find(region_name);
+      if (child_it != child_regions.end() && !child_it->second->merge)
+      {
+        if (!child_it->second->files.empty())
+          new_regions[region_name] = child_it->second;
+        continue;
+      }
+
       // Copy over parent region (shallow copy is sufficient, vector of files
       // will be copied over correctly)
-      auto &region_name = v2.first;
       new_regions[region_name] = std::make_shared<Region>(*v2.second);
       auto &new_region = new_regions[region_name];
 
@@ -432,7 +598,7 @@ bool GameLoader::MergeChildrenWithParents()
     // Simply append any region in child that does *not* exist in parent
     for (auto &v2: child_regions)
     {
-      if (new_regions.find(v2.first) == new_regions.end())
+      if (new_regions.find(v2.first) == new_regions.end() && !v2.second->files.empty())
       {
         // Since these are pointers anyway, just insert directly
         new_regions[v2.first] = v2.second;
@@ -451,7 +617,7 @@ void GameLoader::LogROMDefinition(const std::string &game_name, const RegionsByN
   InfoLog("%s:", game_name.c_str());
   for (auto &v2: regions_by_name)
   {
-    InfoLog("  %s: stride=%zu, chunk size=%zu, byte swap=%d", v2.first.c_str(), v2.second->stride, v2.second->chunk_size, v2.second->byte_swap ? 1 : 0);
+    InfoLog("  %s: stride=%zu, chunk size=%zu, byte layout=%s", v2.first.c_str(), v2.second->stride, v2.second->chunk_size, v2.second->byte_layout.c_str());
     for (auto &file: v2.second->files)
     {
       InfoLog("    %s, crc32=0x%08x, offset=0x%08x", file->filename.c_str(), file->crc32, file->offset);
@@ -536,7 +702,7 @@ void GameLoader::IdentifyGamesInZipArchive(
       Region::ptr_t region = v2.second;
       if (!region->required)
         continue;
-      for (auto file: region->files)
+      for (const auto &file: region->files)
       {
         // Add each file to the set of required files per game
         files_required_by_game[game_name].insert(file);
@@ -612,6 +778,7 @@ void GameLoader::IdentifyGamesInZipArchive(
 
 void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_parent_roms, const ZipArchive &zip, const std::string &zipfilename) const
 {
+  chosen_game->clear();
   *missing_parent_roms = false;
 
   // Find complete unmerged games (those that do not need to be merged with a
@@ -624,6 +791,26 @@ void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_
   std::set<std::string> complete_merged_games;
   std::map<std::string, std::set<File::ptr_t>> files_missing_by_merged_game;
   IdentifyGamesInZipArchive(&complete_merged_games, &files_missing_by_merged_game, zip, m_regions_by_merged_game);
+
+  // A complete game named as the zip file is the one wanted: MAME's merged
+  // sets hold a parent and its clones in one zip named after the parent, and
+  // a clone's own zip is named after it
+  {
+    std::string stem = zipfilename;
+    size_t slash = stem.find_last_of("/\\");
+    if (slash != std::string::npos)
+      stem = stem.substr(slash + 1);
+    size_t dot = stem.find_last_of('.');
+    if (dot != std::string::npos)
+      stem = stem.substr(0, dot);
+    std::transform(stem.begin(), stem.end(), stem.begin(), [](unsigned char c) { return (char) std::tolower(c); });
+    bool childOnly = complete_games.count(stem) && IsChildSet(m_game_info_by_game.find(stem)->second);
+    if (complete_merged_games.count(stem) || (complete_games.count(stem) && !childOnly))
+    {
+      chosen_game->assign(stem);
+      return;
+    }
+  }
 
   /*
    * Find incomplete child games by sorting child games out from the unmerged
@@ -663,9 +850,15 @@ void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_
     files_missing_by_game.erase(parent);
   }
 
-  // Any remaining incomplete games from the unmerged set are legitimate errors
+  // Any remaining incomplete games from the unmerged set are legitimate errors,
+  // but only worth reporting when nothing complete was found: boards share some
+  // ROMs (Model 1 and Model 2 both have the geometrizer table ROMs), so a
+  // complete set of one game is a partial match for others
+  bool found = !complete_merged_games.empty() || !incomplete_child_games.empty() || !complete_games.empty();
   for (auto &v: files_missing_by_game)
   {
+    if (found)
+      break;
     for (auto &file: v.second)
     {
       ErrorLog("'%s' (CRC32 0x%08x) not found in '%s' for game '%s'.", file->filename.c_str(), file->crc32, zipfilename.c_str(), v.first.c_str());
@@ -673,44 +866,45 @@ void GameLoader::ChooseGameInZipArchive(std::string *chosen_game, bool *missing_
     ErrorLog("Ignoring game '%s' in '%s' because it is missing files.", v.first.c_str(), zipfilename.c_str());
   }
 
-  std::set<std::string> candidates(complete_games);
-  candidates.insert(complete_merged_games.begin(), complete_merged_games.end());
-  candidates.insert(incomplete_child_games.begin(), incomplete_child_games.end());
-
-  // If named game requested, is it valid and complete?
-  if (!chosen_game->empty()) {
-    if (candidates.count(chosen_game->c_str()) < 1)  {
-      auto it = m_game_info_by_game.find(chosen_game->c_str());
-      if (it == m_game_info_by_game.end())
-      {
-        ErrorLog("Cannot find unknown game '%s'. Is it defined in '%s'?", chosen_game->c_str(), m_xml_filename.c_str());
-      } else {
-        ErrorLog("Complete '%s' Model 3 game not found in '%s'.", chosen_game->c_str(), zipfilename.c_str());
-      }
-      chosen_game->clear();
-    }
-    return;
-  }
-
   // Choose game: complete merged game > incomplete child game > complete
-  // unmerged game
+  // unmerged game; among several, the one listed first in the XML file (a
+  // family's parent, then its clones in their order)
+  auto first = [this](const std::set<std::string> &games) -> std::string
+  {
+    std::string best;
+    size_t bestOrder = SIZE_MAX;
+    for (const auto &name : games)
+    {
+      auto it = m_game_order.find(name);
+      size_t order = it != m_game_order.end() ? it->second : SIZE_MAX - 1;
+      if (best.empty() || order < bestOrder)
+      {
+        best = name;
+        bestOrder = order;
+      }
+    }
+    return best;
+  };
   if (!complete_merged_games.empty())
-    chosen_game->assign(*complete_merged_games.begin());
+    chosen_game->assign(first(complete_merged_games));
   else if (!incomplete_child_games.empty())
   {
     // TODO: could use scoring to pick game with most files?
-    chosen_game->assign(*incomplete_child_games.begin());
+    chosen_game->assign(first(incomplete_child_games));
     *missing_parent_roms = true;  // try to find missing files in parent ROM zip file
   }
   else if (!complete_games.empty())
-    chosen_game->assign(*complete_games.begin());
+    chosen_game->assign(first(complete_games));
   else
   {
-    ErrorLog("No complete Model 3 games found in '%s'.", zipfilename.c_str());
+    ErrorLog("No complete games found in '%s'.", zipfilename.c_str());
     return;
   }
 
   // Print out which game we chose from valid candidates in the zip file
+  std::set<std::string> candidates(complete_games);
+  candidates.insert(complete_merged_games.begin(), complete_merged_games.end());
+  candidates.insert(incomplete_child_games.begin(), incomplete_child_games.end());
   if (candidates.size() > 1)
     ErrorLog("Multiple games found in '%s' (%s). Loading '%s'.", zipfilename.c_str(), Util::Format(", ").Join(candidates).str().c_str(), chosen_game->c_str());
 }
@@ -721,7 +915,7 @@ bool GameLoader::ComputeRegionSize(uint32_t *region_size, const GameLoader::Regi
   // use maximum end_addr = offset + stride * (num_chunks - 1) + chunk_size.
   std::vector<uint32_t> end_addr;
   bool error = false;
-  for (auto file: region->files)
+  for (const auto &file: region->files)
   {
     const ZippedFile *zipped_file = LookupFile(file, zip);
     if (zipped_file)
@@ -731,7 +925,7 @@ bool GameLoader::ComputeRegionSize(uint32_t *region_size, const GameLoader::Regi
         ErrorLog("File '%s' in '%s' is not sized in %d-byte chunks.", zipped_file->filename.c_str(), zipped_file->zipfilename.c_str(), region->chunk_size);
         error = true;
       }
-	    uint32_t num_chunks = (uint32_t)(zipped_file->uncompressed_size / region->chunk_size);
+      uint32_t num_chunks = (uint32_t)(zipped_file->uncompressed_size / region->chunk_size);
       end_addr.push_back(file->offset + region->stride * (num_chunks - 1) + region->chunk_size);
     }
     else
@@ -742,23 +936,82 @@ bool GameLoader::ComputeRegionSize(uint32_t *region_size, const GameLoader::Regi
   return error;
 }
 
-// We need to preserve the absolute offsets in order for byte swapping to work
-// properly when chunk size is 1
-static inline void CopyBytes(uint8_t *dest_base, uint32_t dest_offset, const uint8_t *src_base, uint32_t src_offset, uint32_t size, uint32_t byte_swap)
+static bool ApplyLayout(ROM *rom, const std::string &byte_layout, size_t stride, const std::string &region_name)
 {
-  for (uint32_t i = 0; i < size; i++)
+  // Empty layout means do nothing
+  if (byte_layout.empty())
+    return false;
+
+  // Validate that the layout string includes the same number of bytes as the region stride. The
+  // stride is block size that the ROM files all contribute to. We also verify that each byte is
+  // used once and only once.
+  if (byte_layout.size() != stride)
   {
-    dest_base[(dest_offset + i) ^ byte_swap] = src_base[src_offset + i];
+    ErrorLog("Byte layout of '%s' region does not match the stride length (%d bytes but should be %d bytes).", region_name.c_str(), byte_layout.size(), stride);
+    return true;
   }
+
+  if (stride > 8)
+  {
+    ErrorLog("Region '%s' has stride larger than 8 (%d), which is currently unsupported.", region_name.c_str(), stride);
+    return true;
+  }
+
+  std::vector<size_t> byte_offsets;
+  for (char c: byte_layout)
+  {
+    if (isdigit(c))
+    {
+      byte_offsets.push_back(c - '0');
+    }
+    else
+    {
+      ErrorLog("Byte layout of '%s' region contains non-numeric characters. Use single-digit byte indices only.", region_name.c_str());
+      return true;
+    }
+  }
+
+  // Check all byte indices 0..N-1 are present
+  std::vector<size_t> sorted(byte_offsets);
+  std::sort(sorted.begin(), sorted.end());  // ascending order
+  size_t expected_offset = 0;
+  for (size_t offset: sorted)
+  {
+    if (offset != expected_offset)
+    {
+      ErrorLog("Byte layout of '%s' region must specify all byte offsets exactly once.", region_name.c_str());
+      return true;
+    }
+    expected_offset += 1;
+  }
+
+  // Okay, all good. Now we can reshuffle the region memory according to layout.
+  uint8_t *buffer = new uint8_t[stride];
+  uint8_t *dest = rom->data.get();
+  for (size_t dest_offset = 0; (dest_offset + stride) <= rom->size; dest_offset += stride)
+  {
+    // Copy current region bytes to temporary buffer. The layout offsets refer to this original layout.
+    memcpy(buffer, dest + dest_offset, stride);
+
+    // Place the bytes back into the ROM region in the layout order specified.
+    for (size_t i = 0; i < stride; i++)
+    {
+      dest[dest_offset + i] = buffer[byte_offsets[i]];
+    }
+  }
+  delete [] buffer;
+
+  return false; // no error
 }
 
 bool GameLoader::LoadRegion(ROM *rom, const GameLoader::Region::ptr_t &region, const ZipArchive &zip) const
 {
   bool error = false;
+
   for (auto &file: region->files)
   {
     std::shared_ptr<uint8_t> tmp;
-    size_t file_size;
+    uint32_t file_size;
     error |= LoadZippedFile(&tmp, &file_size, file, zip);
     if (!error)
     {
@@ -767,26 +1020,29 @@ bool GameLoader::LoadRegion(ROM *rom, const GameLoader::Region::ptr_t &region, c
       if (region->chunk_size == region->stride)
       {
         memcpy(dest + file->offset, src, file_size);
-        if (region->byte_swap)
-          Util::FlipEndian16(dest + file->offset, file_size);
       }
       else
       {
-        uint32_t num_chunks = (uint32_t)file_size / region->chunk_size;
+        uint32_t num_chunks = (uint32_t)(file_size / region->chunk_size);
         uint32_t dest_offset = file->offset;
         uint32_t src_offset = 0;
         uint32_t chunk_size = (uint32_t)region->chunk_size;		// cache these as pointer dereferencing cripples performance in a tight loop
         uint32_t stride = (uint32_t)region->stride;
-        uint32_t byte_swap = region->byte_swap;
         for (uint32_t i = 0; i < num_chunks; i++)
         {
-          CopyBytes(dest, dest_offset, src, src_offset, chunk_size, byte_swap);
+          memcpy(dest + dest_offset, src + src_offset, chunk_size);
           dest_offset += stride;
           src_offset += chunk_size;
         }
       }
     }
   }
+
+  if (!error)
+  {
+    error = ApplyLayout(rom, region->byte_layout, region->stride, region->region_name);
+  }
+
   return error;
 }
 
@@ -870,7 +1126,7 @@ std::string StripFilename(const std::string &filepath)
   return std::string(filepath, 0, last_slash + 1);
 }
 
-bool GameLoader::Load(Game *game, ROMSet *rom_set, const std::string &zipfilename, const std::string &game_name) const
+bool GameLoader::Load(Game *game, ROMSet *rom_set, const std::string &zipfilename) const
 {
   *game = Game();
 
@@ -879,35 +1135,15 @@ bool GameLoader::Load(Game *game, ROMSet *rom_set, const std::string &zipfilenam
   if (LoadZipArchive(&zip, zipfilename))
     return true;
 
-  size_t pos = zipfilename.find_last_of("/\\") + 1;
-  std::string loading = zipfilename.substr(pos, (zipfilename.size() - pos) - 4);
-
-  auto it = m_game_info_by_game.find(loading);
-  if (it == m_game_info_by_game.end())
-  {
-    ErrorLog("No game called '%s'. Please use an appropriately named zip.", loading.c_str());
-    return true;
-  }
-
   // Pick the game to load (there could be multiple ROM sets in a zip file)
-  std::string chosen_game = game_name;
+  std::string chosen_game;
   bool missing_parent_roms = false;
-
-  if (game_name.empty() || game_name == loading)
-  {
-    chosen_game = loading;
-    missing_parent_roms = true;
-  }
-  else
-    ChooseGameInZipArchive(&chosen_game, &missing_parent_roms, zip, zipfilename);
-
+  ChooseGameInZipArchive(&chosen_game, &missing_parent_roms, zip, zipfilename);
   if (chosen_game.empty())
     return true;
 
   // Return game information to caller
   *game = m_game_info_by_game.find(chosen_game)->second;
-
-  if (game->parent.empty()) game->parent = loading;
 
   // Bring in additional parent ROM set if needed
   if (missing_parent_roms)

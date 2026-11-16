@@ -29,11 +29,11 @@
 #ifndef INCLUDED_INPUT_H
 #define INCLUDED_INPUT_H
 
-#include <cstring>
 #include "InputSource.h"
 #include "Types.h"
 #include "Game.h"
 #include "Util/NewConfig.h"
+#include <memory>
 
 class CInputSystem;
 
@@ -45,7 +45,7 @@ class CInputSystem;
 
 #define MAX_MAPPING_LENGTH 255
 
-#define NUM_FF_EFFECTS 3
+#define NUM_FF_EFFECTS 4  // One per EForceFeedback effect, FFStop excepted
 
 enum EForceFeedback
 {
@@ -75,7 +75,7 @@ private:
 	const char *m_defaultMapping;
 	
 	// Assigned input system
-	CInputSystem *m_system;
+	std::shared_ptr<CInputSystem> m_system;
 
 	/*
 	 * Creates an input source using the current input system and assigns it to this input.
@@ -116,7 +116,12 @@ public:
 	/*
 	 * Initializes this input with the given input system.  Must be called before any other methods are used.
 	 */
-	void Initialize(CInputSystem *system);
+	void Initialize(std::shared_ptr<CInputSystem> system);
+
+	/*
+    * Initializes this input with the given input system.  Must be called before any other methods are used.
+    */
+	std::shared_ptr<CInputSystem> GetInputSystem();
 
 	/*
 	 * Returns the name of the group of controls that this input belongs to.
@@ -165,17 +170,17 @@ public:
 	/*
 	 * Returns true if the input is a UI input.
 	 */
-	bool IsUIInput();
+	bool IsUIInput() const;
 
 	/*
 	 * Returns true if the input is configurable and can be set by the user.
 	 */
-	bool IsConfigurable();
+	bool IsConfigurable() const;
 
 	/*
 	 * Returns true if the input is a virtual input, ie one which generates its value based on other inputs and so has no mapping.
 	 */
-	bool IsVirtual();
+	bool IsVirtual() const;
 
 	/*
 	 * Configures the current mapping(s) assigned to this input by asking the user for input.
@@ -192,7 +197,7 @@ public:
 	/*
 	 * Returns true if the value of this input changed during the last poll.
 	 */
-	bool Changed();
+	bool Changed() const;
 
 	/*
 	 * Sends a force feedback command to the input source of this input.
@@ -204,18 +209,18 @@ public:
 // Inlined methods
 //
 
-inline bool CInput::IsUIInput()
+inline bool CInput::IsUIInput() const
 {
 	return gameFlags == Game::INPUT_UI;
 }
 
-inline bool CInput::IsConfigurable()
+inline bool CInput::IsConfigurable() const
 {
 	// All inputs except UI and virtual ones can be configured by the user
-	return ((strcmp(id, "UIExit") == 0) || ((gameFlags != Game::INPUT_UI) && !(flags & INPUT_FLAGS_VIRTUAL)));
+	return (gameFlags != Game::INPUT_UI) && !(flags & INPUT_FLAGS_VIRTUAL);
 }
 
-inline bool CInput::IsVirtual()
+inline bool CInput::IsVirtual() const
 {
 	return !!(flags & INPUT_FLAGS_VIRTUAL);
 }

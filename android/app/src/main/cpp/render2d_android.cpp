@@ -1,308 +1,156 @@
+/*
+ * OpenGL ES 3.0 port of upstream Src/Graphics/Render2D.cpp.
+ *
+ * Mirrors upstream behaviour line for line, but compiles upstream's own 2D
+ * shaders (Src/Graphics/Shaders2D.h) as GLSL ES, so upstream shader changes
+ * (upscale filters etc.) are picked up on every sync.
+ */
+
 #include "Graphics/Render2D.h"
-
-#ifdef __ANDROID__
-
-#include <algorithm>
-#include <cstring>
-
+#include "Graphics/Shaders2D.h"
 #include "OSD/Logger.h"
-#include "Util/NewConfig.h"
 
-namespace {
-// Palette data from Model 3 hardware is in little-endian format (ABGR when viewed as 32-bit).
-// Convert to ARGB (0xAARRGGBB) before handing it to the presenter.
-static inline uint32_t ABGRToARGB(uint32_t abgr)
+#include <string>
+
+namespace
 {
-  return (abgr & 0xFF00FF00u) | ((abgr & 0x00FF0000u) >> 16) | ((abgr & 0x000000FFu) << 16);
-}
-static inline uint8_t GetA(uint32_t argb) { return static_cast<uint8_t>(argb >> 24); }
-static inline uint8_t GetR(uint32_t argb) { return static_cast<uint8_t>(argb >> 16); }
-static inline uint8_t GetG(uint32_t argb) { return static_cast<uint8_t>(argb >> 8); }
-static inline uint8_t GetB(uint32_t argb) { return static_cast<uint8_t>(argb >> 0); }
-static inline uint32_t ARGB(uint8_t a, uint8_t r, uint8_t g, uint8_t b)
-{
-  return (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
-}
-
-static CRender2D::AndroidTileBlitFn g_tileBlit = nullptr;
-
-template <int bits, bool alphaTest, bool clip>
-static inline void DrawTileLine(uint32_t *line,
-                                int pixelOffset,
-                                uint16_t tile,
-                                int patternLine,
-                                const uint32_t *vram,
-                                const uint32_t *palette,
-                                uint16_t mask)
-{
-  static_assert(bits == 4 || bits == 8, "Tiles are either 4- or 8-bit");
-
-  if (bits == 8)
-    patternLine *= 2;
-
-  int patternOffset;
-  if (bits == 4)
+  // Turn an upstream desktop "#version 410 core" shader into GLSL ES 3.00.
+  std::string ToGLES(std::string src)
   {
-    patternOffset = ((tile & 0x3FFF) << 1) | ((tile >> 15) & 1);
-    patternOffset *= 32;
-    patternOffset /= 4;
-  }
-  else
-  {
-    patternOffset = tile & 0x3FFF;
-    patternOffset *= 64;
-    patternOffset /= 4;
-  }
-
-  uint32_t colorHi = tile & ((bits == 4) ? 0x7FF0 : 0x7F00);
-
-  if (bits == 4)
-  {
-    uint32_t pattern = vram[patternOffset + patternLine];
-    for (int p = 7; p >= 0; p--)
-    {
-      if (!clip || (unsigned int)pixelOffset < 496u)
-      {
-        uint16_t maskTest = 1 << (15 - ((pixelOffset + 0) / 32));
-        bool visible = (mask & maskTest) != 0;
-        uint32_t pixel = visible ? ABGRToARGB(palette[((pattern >> (p * 4)) & 0xF) | colorHi]) : 0;
-        if (!alphaTest || (visible && (pixel >> 24) != 0))
-          line[pixelOffset] = pixel;
-      }
-      ++pixelOffset;
-    }
-  }
-  else
-  {
-    for (int i = 0; i < 2; i++)
-    {
-      uint32_t pattern = vram[patternOffset + patternLine + i];
-      for (int p = 3; p >= 0; p--)
-      {
-        if (!clip || (unsigned int)pixelOffset < 496u)
-        {
-          uint16_t maskTest = 1 << (15 - ((pixelOffset + 0) / 32));
-          bool visible = (mask & maskTest) != 0;
-          uint32_t pixel = visible ? ABGRToARGB(palette[((pattern >> (p * 8)) & 0xFF) | colorHi]) : 0;
-          if (!alphaTest || (visible && (pixel >> 24) != 0))
-            line[pixelOffset] = pixel;
-        }
-        ++pixelOffset;
-      }
-    }
+    const std::string desktop = "#version 410 core";
+    const std::string gles = "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;";
+    size_t pos = src.find(desktop);
+    if (pos != std::string::npos)
+      src.replace(pos, desktop.size(), gles);
+    // GLSL ES requires #version on the very first line.
+    pos = src.find("#version");
+    if (pos != std::string::npos)
+      src.erase(0, pos);
+    return src;
   }
 }
 
-template <int bits, bool alphaTest>
-static void DrawLayer(uint32_t *pixels, int layerNum, const uint32_t *vram, const uint32_t *regs, const uint32_t *palette)
+void CRender2D::Setup2D(bool isBottom)
 {
-  const uint16_t *nameTableBase = (const uint16_t *)&vram[(0xF8000 + layerNum * 0x2000) / 4];
-  const uint16_t *hScrollTable = (const uint16_t *)&vram[(0xF6000 + layerNum * 0x400) / 4];
-  bool lineScrollMode = (regs[0x60 / 4 + layerNum] & 0x8000) != 0;
-  int hFullScroll = regs[0x60 / 4 + layerNum] & 0x3FF;
-  int vScroll = (regs[0x60 / 4 + layerNum] >> 16) & 0x1FF;
+  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+  glDisable(GL_DEPTH_TEST);
 
-  const uint16_t *maskTable = (const uint16_t *)&vram[0xF7000 / 4];
-  if (layerNum < 2)
-    maskTable += 1;
-
-  const uint16_t maskPolarity = (layerNum & 1) ? 0xFFFF : 0x0000;
-
-  uint32_t *line = pixels;
-
-  for (int y = 0; y < 384; y++)
+  if (isBottom)
   {
-    int hScroll = (lineScrollMode ? hScrollTable[y] : hFullScroll) & 0x1FF;
-    int hTile = hScroll / 8;
-    int hFine = hScroll & 7;
-    int vFine = (y + vScroll) & 7;
-    const uint16_t *nameTable = &nameTableBase[(64 * ((y + vScroll) / 8)) & 0xFFF];
-    uint16_t mask = *maskTable ^ maskPolarity;
-
-    int pixelOffset = -hFine;
-    int extraTile = (hFine != 0) ? 1 : 0;
-
-    DrawTileLine<bits, alphaTest, true>(line, pixelOffset, nameTable[(hTile ^ 1) & 63], vFine, vram, palette, mask);
-    ++hTile;
-    pixelOffset += 8;
-
-    for (int tx = 1; tx < (62 - 1 + extraTile); tx++)
-    {
-      DrawTileLine<bits, alphaTest, false>(line, pixelOffset, nameTable[(hTile ^ 1) & 63], vFine, vram, palette, mask);
-      ++hTile;
-      pixelOffset += 8;
-    }
-
-    DrawTileLine<bits, alphaTest, true>(line, pixelOffset, nameTable[(hTile ^ 1) & 63], vFine, vram, palette, mask);
-    ++hTile;
-    pixelOffset += 8;
-
-    maskTable += 2;
-    line += 496;
-  }
-}
-} // namespace
-
-CRender2D::CRender2D(const Util::Config::Node &config) : m_config(config) {}
-
-void CRender2D::SetAndroidTileBlit(AndroidTileBlitFn fn)
-{
-  g_tileBlit = fn;
-}
-
-Result CRender2D::Init(unsigned /*xOffset*/, unsigned /*yOffset*/, unsigned xRes, unsigned yRes, unsigned /*totalXRes*/, unsigned /*totalYRes*/)
-{
-  // Use the core's nominal resolution if present, but fall back to known TG size.
-  m_xPixels = (xRes != 0) ? xRes : 496;
-  m_yPixels = (yRes != 0) ? yRes : 384;
-  if (m_xPixels != 496 || m_yPixels != 384)
-  {
-    // The tile generator renderer is currently hard-coded to the native TG resolution.
-    m_xPixels = 496;
-    m_yPixels = 384;
+    glClearColor(0.0, 0.0, 0.0, 0.0);
+    glViewport(0, 0, m_totalXPixels, m_totalYPixels);
+    glDisable(GL_SCISSOR_TEST);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_SCISSOR_TEST);
   }
 
-  m_topSurface.assign(m_xPixels * m_yPixels, 0);
-  m_bottomSurface.assign(m_xPixels * m_yPixels, 0);
-  m_frame.assign(m_xPixels * m_yPixels, ARGB(0xFF, 0, 0, 0));
-  return Result::OKAY;
+  bool stretchBottom = m_config["WideBackground"].ValueAsDefault<bool>(false) && isBottom;
+  if (!stretchBottom)
+    glViewport(m_xOffset - m_correction, m_yOffset + m_correction, m_xPixels, m_yPixels);
 }
 
-void CRender2D::AttachRegisters(const uint32_t *regPtr) { m_regs = regPtr; }
-void CRender2D::AttachPalette(const uint32_t *palPtr[2])
+void CRender2D::DrawSurface(GLuint textureID)
 {
-  m_palette[0] = palPtr[0];
-  m_palette[1] = palPtr[1];
+  m_drawShader.EnableShader();
+  glEnable(GL_BLEND);
+  glBindVertexArray(m_vao);
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, textureID);
+  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+  glBindVertexArray(0);
+  glDisable(GL_BLEND);
+  m_drawShader.DisableShader();
 }
-void CRender2D::AttachVRAM(const uint8_t *vramPtr) { m_vram = reinterpret_cast<const uint32_t *>(vramPtr); }
 
-void CRender2D::BeginFrame(void) {}
-
-std::pair<bool, bool> CRender2D::DrawTilemaps(uint32_t *pixelsBottom, uint32_t *pixelsTop)
+void CRender2D::BeginFrame(void)
 {
-  if (!m_regs || !m_vram || !m_palette[0] || !m_palette[1])
-    return {false, false};
-
-  unsigned priority = (m_regs[0x20 / 4] >> 8) & 0xF;
-
-  bool noBottomSurface = true;
-  static const int bottomOrder[4] = {3, 2, 1, 0};
-  for (int i = 0; i < 4; i++)
-  {
-    int layerNum = bottomOrder[i];
-    bool is4Bit = (m_regs[0x20 / 4] & (1 << (12 + layerNum))) != 0;
-    bool enabled = (m_regs[0x60 / 4 + layerNum] & 0x80000000) != 0;
-    bool selected = (priority & (1 << layerNum)) == 0;
-    if (enabled && selected)
-    {
-      if (noBottomSurface)
-      {
-        if (is4Bit)
-          DrawLayer<4, false>(pixelsBottom, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-        else
-          DrawLayer<8, false>(pixelsBottom, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-      }
-      else
-      {
-        if (is4Bit)
-          DrawLayer<4, true>(pixelsBottom, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-        else
-          DrawLayer<8, true>(pixelsBottom, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-      }
-      noBottomSurface = false;
-    }
-  }
-
-  bool noTopSurface = true;
-  static const int topOrder[4] = {3, 2, 1, 0};
-  for (int i = 0; i < 4; i++)
-  {
-    int layerNum = topOrder[i];
-    bool is4Bit = (m_regs[0x20 / 4] & (1 << (12 + layerNum))) != 0;
-    bool enabled = (m_regs[0x60 / 4 + layerNum] & 0x80000000) != 0;
-    bool selected = (priority & (1 << layerNum)) != 0;
-    if (enabled && selected)
-    {
-      if (noTopSurface)
-      {
-        if (is4Bit)
-          DrawLayer<4, false>(pixelsTop, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-        else
-          DrawLayer<8, false>(pixelsTop, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-      }
-      else
-      {
-        if (is4Bit)
-          DrawLayer<4, true>(pixelsTop, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-        else
-          DrawLayer<8, true>(pixelsTop, layerNum, m_vram, m_regs, m_palette[layerNum / 2]);
-      }
-      noTopSurface = false;
-    }
-  }
-
-  return { !noTopSurface, !noBottomSurface };
 }
 
 void CRender2D::PreRenderFrame(void)
 {
-  if (m_frame.empty())
-    return;
-  m_surfacesPresent = DrawTilemaps(m_bottomSurface.data(), m_topSurface.data());
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 512);  // skip the non viewable data
+  for (int i = 0; i < 2; i++)
+  {
+    if (!m_drawBuffers[i])
+      continue;
+    glBindTexture(GL_TEXTURE_2D, m_textureIDs[i]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 496, 384, GL_RGBA, GL_UNSIGNED_BYTE, m_drawBuffers[i]->data);
+  }
+  glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
 }
 
 void CRender2D::RenderFrameBottom(void)
 {
-  if (m_frame.empty())
-    return;
-  if (m_surfacesPresent.second)
-    std::memcpy(m_frame.data(), m_bottomSurface.data(), m_frame.size() * sizeof(uint32_t));
-  else
-    std::fill(m_frame.begin(), m_frame.end(), ARGB(0xFF, 0, 0, 0));
-
-  if (g_tileBlit && m_surfacesPresent.second) {
-    g_tileBlit(m_bottomSurface.data(), (int)m_xPixels, (int)m_yPixels, false);
-  }
-}
-
-void CRender2D::CompositeTopOntoFrame()
-{
-  if (!m_surfacesPresent.first)
-    return;
-
-  const uint32_t *src = m_topSurface.data();
-  uint32_t *dst = m_frame.data();
-  const size_t count = m_frame.size();
-  for (size_t i = 0; i < count; i++)
-  {
-    uint32_t s = src[i];
-    uint8_t a = GetA(s);
-    if (a == 0)
-      continue;
-    if (a == 255)
-    {
-      dst[i] = s;
-      continue;
-    }
-
-    uint32_t d = dst[i];
-    const uint8_t sr = GetR(s), sg = GetG(s), sb = GetB(s);
-    const uint8_t dr = GetR(d), dg = GetG(d), db = GetB(d);
-    const uint32_t invA = 255 - a;
-    uint8_t rr = static_cast<uint8_t>((sr * a + dr * invA) / 255);
-    uint8_t rg = static_cast<uint8_t>((sg * a + dg * invA) / 255);
-    uint8_t rb = static_cast<uint8_t>((sb * a + db * invA) / 255);
-    dst[i] = ARGB(0xFF, rr, rg, rb);
-  }
+  Setup2D(true);
+  DrawSurface(m_textureIDs[0]);
 }
 
 void CRender2D::RenderFrameTop(void)
 {
-  if (m_frame.empty())
-    return;
-  CompositeTopOntoFrame();
+  Setup2D(false);
+  DrawSurface(m_textureIDs[1]);
 }
 
-void CRender2D::EndFrame(void) {}
+void CRender2D::EndFrame(void)
+{
+}
 
-#endif // __ANDROID__
+void CRender2D::AttachDrawBuffers(std::shared_ptr<TileGenBuffer> bottom, std::shared_ptr<TileGenBuffer> top)
+{
+  m_drawBuffers[0] = bottom;
+  m_drawBuffers[1] = top;
+}
+
+Result CRender2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes, unsigned aaTarget, UpscaleMode upscaleMode)
+{
+  m_xPixels = xRes;
+  m_yPixels = yRes;
+  m_xOffset = xOffset;
+  m_yOffset = yOffset;
+  m_totalXPixels = totalXRes;
+  m_totalYPixels = totalYRes;
+  m_correction = (UINT32)(((yRes / 384.) * 2.) + 0.5);  // the 2D layer is 2 pixels off the 3D
+  m_upscaleMode = (m_xPixels == 496 && m_yPixels == 384) ? UpscaleMode::Nearest : upscaleMode;
+
+  std::string um = "#define UPSCALEMODE " + std::to_string((int)m_upscaleMode) + '\n';
+  std::string vs = ToGLES(s_vertexShader);
+  std::string fs = ToGLES(std::string(s_fragmentShaderHeader)) + um + s_fragmentShader;
+
+  m_drawShader.UnloadShaders();
+  m_drawShader.LoadShaders(vs.c_str(), fs.c_str());
+  m_drawShader.GetUniformLocationMap("tex1");
+  m_drawShader.EnableShader();
+  glUniform1i(m_drawShader.uniformLocMap["tex1"], 0);
+  m_drawShader.DisableShader();
+
+  if (!m_vao)
+    glGenVertexArrays(1, &m_vao);
+  if (!m_textureIDs[0])
+    glGenTextures(2, m_textureIDs);
+
+  for (auto& t : m_textureIDs)
+  {
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, m_upscaleMode == UpscaleMode::Nearest ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, m_upscaleMode == UpscaleMode::Nearest ? GL_NEAREST : GL_LINEAR);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 496, 384, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+  }
+
+  return Result::OKAY;
+}
+
+CRender2D::CRender2D(const Util::Config::Node& config)
+  : m_config(config)
+{
+  DebugLog("Built Render2D (GLES)\n");
+}
+
+CRender2D::~CRender2D(void)
+{
+  if (m_textureIDs[0])
+    glDeleteTextures(2, m_textureIDs);
+  if (m_vao)
+    glDeleteVertexArrays(1, &m_vao);
+}

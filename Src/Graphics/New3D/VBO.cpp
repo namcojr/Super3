@@ -1,6 +1,24 @@
-#include "VBO.h"
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
 
-namespace New3D {
+#include "VBO.h"
 
 VBO::VBO()
 {
@@ -17,7 +35,7 @@ void VBO::Create(GLenum target, GLenum usage, GLsizeiptr size, const void* data)
 	glBufferData(target, size, data, usage);		// upload data to video card
 
 	m_target	= target;
-	m_capacity	= size;
+	m_capacity	= (int)size;
 	m_size		= 0;
 
 	Bind(false);		// unbind
@@ -40,7 +58,7 @@ bool VBO::AppendData(GLsizeiptr size, const GLvoid* data)
 
 	BufferSubData(m_size, size, data);
 
-	m_size += size;
+	m_size += (int)size;
 
 	return true;
 }
@@ -71,14 +89,12 @@ void VBO::Bind(bool enable)
 	}
 }
 
-int VBO::GetSize()
+int VBO::GetSize() const
 {
 	return m_size;
 }
 
-int VBO::GetCapacity()
+int VBO::GetCapacity() const
 {
 	return m_capacity;
 }
-
-} // New3D

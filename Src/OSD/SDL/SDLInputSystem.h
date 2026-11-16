@@ -43,9 +43,6 @@ struct SDLKeyMapStruct
 	SDL_Scancode sdlKey;
 };
 
-
-#define MAX_MICE 32
-
 /*
  * Input system that uses SDL.
  */
@@ -72,12 +69,12 @@ private:
 	// Current key state obtained from SDL
 	const Uint8 *m_keyState;
 
-	// Current mouse state obtained from ManyMouse
-	int m_mouseX[MAX_MICE];
-	int m_mouseY[MAX_MICE];
-	int m_mouseZ[MAX_MICE];
-	short m_mouseWheelDir[MAX_MICE];
-	Uint8 m_mouseButtons[MAX_MICE];
+	// Current mouse state obtained from SDL
+	int m_mouseX;
+	int m_mouseY;
+	int m_mouseZ;
+	short m_mouseWheelDir;
+	Uint8 m_mouseButtons;
 
 	// SDL2 ffb
 	SDL_HapticEffect eff;
@@ -94,23 +91,6 @@ private:
 		int effectFrictionForceID = -1;
 	};
 	std::vector<hapticInfo> m_SDLHapticDatas;
-
-	struct Mouse
-	{
-		int connected;
-		int x;
-		int y;
-		int relx;
-		int rely;
-		SDL_Color color;
-		char name[MAX_NAME_LENGTH + 1];
-		Uint32 buttons;
-		Uint32 scrolluptick;
-		Uint32 scrolldowntick;
-		Uint32 scrolllefttick;
-		Uint32 scrollrighttick;
-	};
-	std::vector<MouseDetails> m_mseDetails;
 
 	/*
 	 * Opens all attached joysticks.
@@ -132,19 +112,19 @@ protected:
 
 	const char *GetKeyName(int keyIndex);
 
-	bool IsKeyPressed(int kbdNum, int keyIndex);
+	bool IsKeyPressed(int kbdNum, int keyIndex) const;
 
-	int GetMouseAxisValue(int mseNum, int axisNum);
+	int GetMouseAxisValue(int mseNum, int axisNum) const;
 
-	int GetMouseWheelDir(int mseNum);
+	int GetMouseWheelDir(int mseNum) const;
 
-	bool IsMouseButPressed(int mseNum, int butNum);
+	bool IsMouseButPressed(int mseNum, int butNum) const;
 
-	int GetJoyAxisValue(int joyNum, int axisNum);
+	int GetJoyAxisValue(int joyNum, int axisNum) const;
 
-	bool IsJoyPOVInDir(int joyNum, int povNum, int povDir);
+	bool IsJoyPOVInDir(int joyNum, int povNum, int povDir) const;
 
-	bool IsJoyButPressed(int joyNum, int butNum);
+	bool IsJoyButPressed(int joyNum, int butNum) const;
 
 	bool ProcessForceFeedbackCmd(int joyNum, int axisNum, ForceFeedbackCmd ffCmd);
 
@@ -176,11 +156,11 @@ public:
 
 	~CSDLInputSystem();
 
-	int GetNumKeyboards();
+	int GetNumKeyboards() const;
 
-	int GetNumMice();
+	int GetNumMice() const;
 
-	int GetNumJoysticks();
+	int GetNumJoysticks() const;
 
 	const KeyDetails *GetKeyDetails(int kbdNum);
 

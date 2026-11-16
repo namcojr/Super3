@@ -1,12 +1,27 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef FBO_H
 #define FBO_H
 
-#ifdef __ANDROID__
-#include <GLES3/gl3.h>
-#else
 #include <GL/glew.h>
-#endif
-#include "VBO.h"
 #include "GLSLShader.h"
 #include "Model.h"
 
@@ -19,11 +34,8 @@ public:
 	~R3DFrameBuffers();
 
 	void	Draw();					// draw and composite the transparent layers
-	void	CompositeBaseLayer();
-	void	CompositeAlphaLayer();
-	void	DrawOverTransLayers();	// opaque pixels in next priority layer need to wipe trans pixels
 	
-	bool	CreateFBO(int width, int height);
+	Result	CreateFBO(int width, int height);
 	void	DestroyFBO();
 
 	void	BindTexture(Layer layer);
@@ -33,26 +45,10 @@ public:
 
 private:
 
-	struct FBVertex
-	{
-		void Set(float x, float y, float s, float t)
-		{
-			texCoords[0] = s;
-			texCoords[1] = t;
-			verts[0] = x;
-			verts[1] = y;
-			verts[2] = 0.f;	// z = 0
-		}
-
-		float texCoords[2];
-		float verts[3];
-	};
-
-	bool	CreateFBODepthCopy(int width, int height);
+	Result	CreateFBODepthCopy(int width, int height);
 	GLuint	CreateTexture(int width, int height);
 	void	AllocShaderTrans();
 	void	AllocShaderBase();
-	void	AllocShaderWipe();
 
 	void	DrawBaseLayer();
 	void	DrawAlphaLayer();
@@ -69,10 +65,9 @@ private:
 	// shaders
 	GLSLShader m_shaderBase;
 	GLSLShader m_shaderTrans;
-	GLSLShader m_shaderWipe;
 
-	// vertices for fbo
-	VBO m_vbo;
+	// vao
+	GLuint m_vao;	// this really needed if we don't actually use vertex attribs?
 };
 
 }

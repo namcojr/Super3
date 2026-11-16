@@ -1,7 +1,7 @@
 /**
  ** Supermodel
- ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2003-2022 The Supermodel Team
+ ** A Sega Model Series Arcade Emulator.
+ ** Copyright 2003-2026 The Supermodel Team
  **
  ** This file is part of Supermodel.
  **
@@ -23,6 +23,23 @@
  * Main.cpp
  *
  * Main program driver for the SDL port.
+ *
+ * Bugs and Issues to Address
+ * --------------------------
+ * - -gfx-state crashes when ENABLE_DEBUGGER is also enabled:
+ *
+ *    #0  0x00007ff6586392a0 in CSoundBoard::GetDSB (this=0x1128) at Src/Model3/SoundBoard.cpp:552
+ *    #1  0x00007ff6587072cf in Debugger::CSupermodelDebugger::CreateDSBCPUDebug (model3=0x0) at Src/Debugger/SupermodelDebugger.cpp:269
+ *    #2  0x00007ff6587076e9 in Debugger::CSupermodelDebugger::AddCPUs (this=0x185da75df40) at Src/Debugger/SupermodelDebugger.cpp:361
+ *    #3  0x00007ff6586f91a6 in Debugger::CDebugger::Attach (this=0x185da75df40) at Src/Debugger/Debugger.cpp:263
+ *    #4  0x00007ff658705312 in Debugger::CConsoleDebugger::Attach (this=0x185da75df40) at Src/Debugger/ConsoleDebugger.cpp:2707
+ *    #5  0x00007ff65862c6fc in Supermodel (game=..., rom_set=0x6cc8dff0e0, Model3=0x185da7598d0, Inputs=0x185da752590, Outputs=0x0, Debugger=std::shared_ptr<Debugger::CDebugger> (use count 3, weak count 0) = {...})
+ *        at Src/OSD/SDL/Main.cpp:978
+ *    #6  0x00007ff658634ba3 in SDL_main (argc=3, argv=0x185da4e68a0) at Src/OSD/SDL/Main.cpp:2056
+ *    #7  0x00007ff658720141 in main_getcmdline ()
+ *    #8  0x00007ff6585b13b1 in __tmainCRTStartup () at C:/M/mingw-w64-crt-git/src/mingw-w64/mingw-w64-crt/crt/crtexe.c:321
+ *    #9  0x00007ff6585b14e6 in mainCRTStartup () at C:/M/mingw-w64-crt-git/src/mingw-w64/mingw-w64-crt/crt/crtexe.c:202
+ * - Need to address all the stale TO-DOs below and clear them out :)
  *
  * To Do Before Next Release
  * -------------------------
@@ -61,28 +78,53 @@
 #include "DirectInputSystem.h"
 #include "WinOutputs.h"
 #endif
+#include "NetOutputs.h"
 
 #include "Supermodel.h"
 #include "Util/Format.h"
 #include "Util/NewConfig.h"
 #include "Util/ConfigBuilders.h"
+#include "OSD/FileSystemPath.h"
 #include "GameLoader.h"
 #include "SDLInputSystem.h"
 #include "SDLIncludes.h"
 #include "Debugger/SupermodelDebugger.h"
+#ifndef SUPERMODEL_OSX
 #include "Graphics/Legacy3D/Legacy3D.h"
+#endif
 #include "Graphics/New3D/New3D.h"
 #include "Model3/IEmulator.h"
 #include "Model3/Model3.h"
+#include "Pro1000/Pro1000.h"
+#include "Network/NetServer.h"
+#include "Graphics/Pro1000Render2D.h"
+#include "Model1/Model1.h"
+#include "Model2/Model2.h"
+#include "Graphics/Model1Render.h"
+#include "Graphics/IRender2D.h"
 #include "OSD/Audio.h"
+#include "OSD/ConsoleInput.h"
+#include "Graphics/New3D/VBO.h"
+#include "Graphics/SuperAA.h"
+#include "Sound/MPEG/MpegAudio.h"
 
 #include <iostream>
 #include "Util/BMPFile.h"
+
+#include "Crosshair.h"
+#include "OSD/ConfigFile.h"
+#include "Gui.h"
 
 
 /******************************************************************************
  Global Run-time Config
 ******************************************************************************/
+
+static const std::string s_analysisPath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Analysis);
+static const std::string s_configFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Supermodel.ini";
+static const std::string s_gameXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Games.xml";
+static const std::string s_musicXMLFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Config) << "Music.xml";
+static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Log) << "Supermodel.log";
 
 static Util::Config::Node s_runtime_config("Global");
 
@@ -93,8 +135,6 @@ static Util::Config::Node s_runtime_config("Global");
 
 SDL_Window *s_window = nullptr;
 
-SDL_Window *get_window() { return s_window; }
-
 /*
  * Position and size of rectangular region within OpenGL display to render to.
  * Unlike the config tree, these end up containing the actual resolution (and
@@ -104,9 +144,13 @@ SDL_Window *get_window() { return s_window; }
 static unsigned  xOffset, yOffset;      // offset of renderer output within OpenGL viewport
 static unsigned  xRes, yRes;            // renderer output resolution (can be smaller than GL viewport)
 static unsigned  totalXRes, totalYRes;  // total resolution (the whole GL viewport)
+static int aaValue = 1;                 // default is 1 which is no aa
+static CRTcolor CRTcolors = CRTcolor::None; // default to no gamma/color adaption being done
 
-unsigned int get_total_width() { return totalXRes; }
-unsigned int get_total_height() { return totalYRes; }
+/*
+ * Crosshair stuff
+ */
+static CCrosshair* s_crosshair = nullptr;
 
 static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio)
 {
@@ -118,20 +162,20 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
   *totalYResPtr = actualHeight;
 
   // If required, fix the aspect ratio of the resolution that the user passed to match Model 3 ratio
-  float xRes = float(*xResPtr);
-  float yRes = float(*yResPtr);
+  float xResF = float(*xResPtr);
+  float yResF = float(*yResPtr);
   if (keepAspectRatio)
   {
-    float model3Ratio = 496.0f/384.0f;
-    if (yRes < (xRes/model3Ratio))
-      xRes = yRes*model3Ratio;
-    if (xRes < (yRes*model3Ratio))
-      yRes = xRes/model3Ratio;
+    float model3Ratio = float(496.0/384.0);
+    if (yResF < (xResF/model3Ratio))
+      xResF = yResF*model3Ratio;
+    if (xResF < (yResF*model3Ratio))
+      yResF = xResF/model3Ratio;
   }
 
   // Center the visible area
-  *xOffsetPtr = (*xResPtr - (unsigned) xRes)/2;
-  *yOffsetPtr = (*yResPtr - (unsigned) yRes)/2;
+  *xOffsetPtr = (*xResPtr - (unsigned) xResF)/2;
+  *yOffsetPtr = (*yResPtr - (unsigned) yResF)/2;
 
   // If the desired resolution is smaller than what we got, re-center again
   if (int(*xResPtr) < actualWidth)
@@ -148,30 +192,73 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
   glDisable(GL_CULL_FACE);
 
   // Clear both buffers to ensure a black border
-  for (int i = 0; i < 2; i++)
+  for (int i = 0; i < 3; i++)
   {
     glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
     SDL_GL_SwapWindow(s_window);
   }
 
   // Write back resolution parameters
-  *xResPtr = (unsigned) xRes;
-  *yResPtr = (unsigned) yRes;
+  *xResPtr = (unsigned) xResF;
+  *yResPtr = (unsigned) yResF;
 
-  UINT32 correction = (UINT32)(((yRes / 384.f) * 2) + 0.5f);
+  UINT32 correction = (UINT32)(((*yResPtr / 384.) * 2.) + 0.5); // due to the 2D layer compensation (2 pixels off)
 
   glEnable(GL_SCISSOR_TEST);
 
   // Scissor box (to clip visible area)
   if (s_runtime_config["WideScreen"].ValueAsDefault<bool>(false))
   {
-    glScissor(0, correction, *totalXResPtr, *totalYResPtr - (correction * 2));
+    glScissor(0* aaValue, correction* aaValue, *totalXResPtr * aaValue, (*totalYResPtr - (correction * 2)) * aaValue);
   }
   else
   {
-    glScissor(*xOffsetPtr + correction, *yOffsetPtr + correction, *xResPtr - (correction * 2), *yResPtr - (correction * 2));
+    glScissor((*xOffsetPtr + correction) * aaValue, (*yOffsetPtr + correction) * aaValue, (*xResPtr - (correction * 2)) * aaValue, (*yResPtr - (correction * 2)) * aaValue);
   }
   return Result::OKAY;
+}
+
+// static void GLAPIENTRY DebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam)
+// {
+//     printf("OGLDebug:: 0x%X: %s\n", id, message);
+// }
+
+// In windows with an nvidia card (sorry not tested anything else) you can customise the resolution.
+// This also allows you to set a totally custom refresh rate. Apparently you can drive most monitors at
+// 57.5fps with no issues. Anyway this code will automatically pick up your custom refresh rate, and set it if it exists.
+// If it doesn't exist, then it'll probably just default to 60 or whatever your refresh rate is.
+static void SetFullScreenRefreshRate()
+{
+    float refreshRateHz = std::abs(s_runtime_config["RefreshRate"].ValueAs<float>());
+
+    if (refreshRateHz > 57.f && refreshRateHz < 58.f) {
+
+        int display_in_use = 0; /* Only using first display */
+
+        int display_mode_count = SDL_GetNumDisplayModes(display_in_use);
+        if (display_mode_count < 1) {
+            return;
+        }
+
+        for (int i = 0; i < display_mode_count; ++i) {
+
+            SDL_DisplayMode mode;
+
+            if (SDL_GetDisplayMode(display_in_use, i, &mode) != 0) {
+                return;
+            }
+
+            if (SDL_BITSPERPIXEL(mode.format) >= 24 && (unsigned)mode.w == totalXRes && (unsigned)mode.h == totalYRes) {
+                if (mode.refresh_rate == 57 || mode.refresh_rate == 58) {       // nvidia is fairly flexible in what refresh rate windows will show, so we can match either 57 or 58,
+                    int result = SDL_SetWindowDisplayMode(s_window, &mode);     // both are totally non standard frequencies and shouldn't be set incorrectly
+                    if (result == 0) {
+                        printf("Custom fullscreen mode set: %ix%i@57.524 Hz\n", mode.w, mode.h);
+                    }
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /*
@@ -186,7 +273,7 @@ static Result SetGLGeometry(unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned
  * NOTE: keepAspectRatio should always be true. It has not yet been tested with
  * the wide screen hack.
  */
-static Result CreateGLScreen(const std::string &caption, bool focusWindow, unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
+static Result CreateGLScreen(bool coreContext, const std::string &caption, bool focusWindow, unsigned *xOffsetPtr, unsigned *yOffsetPtr, unsigned *xResPtr, unsigned *yResPtr, unsigned *totalXResPtr, unsigned *totalYResPtr, bool keepAspectRatio, bool fullScreen)
 {
   GLenum err;
 
@@ -206,9 +293,23 @@ static Result CreateGLScreen(const std::string &caption, bool focusWindow, unsig
   SDL_GL_SetAttribute(SDL_GL_RED_SIZE,8);
   SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,8);
   SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,8);
-  SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,24);
-  SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,8);
+  if(s_runtime_config["New3DEngine"].ValueAsDefault<bool>(true))
+  {
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,0);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,0);
+  }
+  else
+  {
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,24);
+    SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE,8);
+  }
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
+
+  if (coreContext) {
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+      SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+  }
 
   // Set video mode
   s_window = SDL_CreateWindow(caption.c_str(), SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, *xResPtr, *yResPtr, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | (fullScreen ? SDL_WINDOW_FULLSCREEN : 0));
@@ -239,12 +340,37 @@ static Result CreateGLScreen(const std::string &caption, bool focusWindow, unsig
 
   // Initialize GLEW, allowing us to use features beyond OpenGL 1.2
   err = glewInit();
-  // Ignore not required GLX error
-  if (GLEW_OK != err && GLEW_ERROR_NO_GLX_DISPLAY != err)
+#ifdef GLEW_ERROR_NO_GLX_DISPLAY
+  // Wayland: SDL's context is EGL, so there's no GLX display. GLEW has loaded
+  // the GL functions by then and fails only on its GLX extensions, unused here.
+  if (GLEW_ERROR_NO_GLX_DISPLAY == err)
+    err = GLEW_OK;
+#endif
+  if (GLEW_OK != err)
   {
     ErrorLog("OpenGL initialization failed: %s\n", glewGetErrorString(err));
     return Result::FAIL;
   }
+
+  // print some basic GPU info
+  GLint profile = 0;
+  glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+
+  printf("GPU info: %s ", glGetString(GL_VERSION));
+
+  if (profile & GL_CONTEXT_CORE_PROFILE_BIT) {
+      printf("(core profile)");
+  }
+
+  if (profile & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT) {
+      printf("(compatibility profile)");
+  }
+
+  printf("\n\n");
+
+  //glDebugMessageCallback(DebugCallback, NULL);
+  //glDebugMessageControl(GL_DONT_CARE,GL_DONT_CARE,GL_DONT_CARE, 0, 0, GL_TRUE);
+  //glEnable(GL_DEBUG_OUTPUT);
 
   return SetGLGeometry(xOffsetPtr, yOffsetPtr, xResPtr, yResPtr, totalXResPtr, totalYResPtr, keepAspectRatio);
 }
@@ -281,7 +407,7 @@ static void PrintGLInfo(bool createScreen, bool infoLog, bool printExtensions)
   unsigned xOffset, yOffset, xRes=496, yRes=384, totalXRes, totalYRes;
   if (createScreen)
   {
-    if (Result::OKAY != CreateGLScreen("Supermodel - Querying OpenGL Information...", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
+    if (Result::OKAY != CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), "Supermodel - Querying OpenGL Information...", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
     {
       ErrorLog("Unable to query OpenGL.\n");
       return;
@@ -437,15 +563,24 @@ static void SaveFrameBuffer(const std::string& file)
 void Screenshot()
 {
     // Make a screenshot
-    char file[128];
-    std::string info = "Screenshot created: ";
     time_t now = std::time(nullptr);
     tm* ltm = std::localtime(&now);
+    std::string file = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Screenshots)
+        << "Screenshot_"
+        << std::setfill('0') << std::setw(4) << (1900 + ltm->tm_year)
+        << '-'
+        << std::setw(2) << (1 + ltm->tm_mon)
+        << '-'
+        << std::setw(2) << ltm->tm_mday
+        << "_("
+        << std::setw(2) << ltm->tm_hour
+        << '-'
+        << std::setw(2) << ltm->tm_min
+        << '-'
+        << std::setw(2) << ltm->tm_sec
+        << ").bmp";
 
-    sprintf(file, "Screenshot %.4d-%.2d-%.2d (%.2d-%.2d-%.2d).bmp", 1900 + ltm->tm_year, 1 + ltm->tm_mon, ltm->tm_mday, ltm->tm_hour, ltm->tm_min, ltm->tm_sec);
-
-    info += file;
-    puts(info.c_str());
+    std::cout << "Screenshot created: " << file << std::endl;
     SaveFrameBuffer(file);
 }
 
@@ -460,6 +595,7 @@ void Screenshot()
 #include <fstream>
 
 static std::string s_gfxStatePath;
+static const std::string k_gfxAnalysisPath = "GraphicsAnalysis/";
 
 static std::string GetFileBaseName(const std::string &file)
 {
@@ -516,7 +652,7 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
       if ((unknownPolyBits[idx] & mask))
       {
         Emu->RenderFrame();
-        std::string file = Util::Format() << "Analysis/" << GetFileBaseName(s_gfxStatePath) << "." << "poly" << "." << idx << "_" << Util::Hex(mask) << ".bmp";
+        std::string file = Util::Format() << k_gfxAnalysisPath << GetFileBaseName(s_gfxStatePath) << "." << "poly" << "." << idx << "_" << Util::Hex(mask) << ".bmp";
         SaveFrameBuffer(file);
       }
     }
@@ -532,7 +668,7 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
       if ((unknownCullingNodeBits[idx] & mask))
       {
         Emu->RenderFrame();
-        std::string file = Util::Format() << "Analysis/" << GetFileBaseName(s_gfxStatePath) << "." << "culling" << "." << idx << "_" << Util::Hex(mask) << ".bmp";
+        std::string file = Util::Format() << k_gfxAnalysisPath << GetFileBaseName(s_gfxStatePath) << "." << "culling" << "." << idx << "_" << Util::Hex(mask) << ".bmp";
         SaveFrameBuffer(file);
       }
     }
@@ -541,7 +677,7 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
   glReadBuffer(readBuffer);
 
   // Generate the HTML GUI
-  std::string file = Util::Format() << "Analysis/_" << GetFileBaseName(s_gfxStatePath) << ".html";
+  std::string file = Util::Format() << k_gfxAnalysisPath << "_" << GetFileBaseName(s_gfxStatePath) << ".html";
   std::ofstream fs(file);
   if (!fs.good())
     ErrorLog("Unable to open '%s' for writing.", file.c_str());
@@ -574,16 +710,28 @@ static void TestPolygonHeaderBits(IEmulator *Emu)
  Different subsystems output their own blocks.
 ******************************************************************************/
 
-static const int STATE_FILE_VERSION = 3;  // save state file version
+static const int STATE_FILE_VERSION = 6;  // save state file version
 static const int NVRAM_FILE_VERSION = 0;  // NVRAM file version
 static unsigned s_saveSlot = 0;           // save state slot #
 
-static void SaveState(IEmulator *Model3)
+static bool CheckSaveStatesSupported(IEmulator *Emu)
 {
+  if (Emu->SupportsSaveStates())
+    return true;
+  puts("Save states are not supported for this system.");
+  InfoLog("Save states are not supported for this system.");
+  return false;
+}
+
+static void SaveState(IEmulator *Emu)
+{
+  if (!CheckSaveStatesSupported(Emu))
+    return;
+
   CBlockFile  SaveState;
 
-  std::string file_path = Util::Format() << "Saves/" << Model3->GetGame().name << ".st" << s_saveSlot;
-  if (Result::OKAY != SaveState.Create(file_path, "Supermodel Save State", "Supermodel Version " SUPERMODEL_VERSION))
+  std::string file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << Emu->GetGame().name << ".st" << s_saveSlot;
+  if (Result::OKAY != SaveState.Create(file_path, "Supermodel Save State", "Supermodel Version " + SupermodelVersion()))
   {
     ErrorLog("Unable to save state to '%s'.", file_path.c_str());
     return;
@@ -592,22 +740,25 @@ static void SaveState(IEmulator *Model3)
   // Write file format version and ROM set ID to header block
   int32_t fileVersion = STATE_FILE_VERSION;
   SaveState.Write(&fileVersion, sizeof(fileVersion));
-  SaveState.Write(Model3->GetGame().name);
+  SaveState.Write(Emu->GetGame().name);
 
   // Save state
-  Model3->SaveState(&SaveState);
+  Emu->SaveState(&SaveState);
   SaveState.Close();
   printf("Saved state to '%s'.\n", file_path.c_str());
-  DebugLog("Saved state to '%s'.\n", file_path.c_str());
+  InfoLog("Saved state to '%s'.", file_path.c_str());
 }
 
-static void LoadState(IEmulator *Model3, std::string file_path = std::string())
+static void LoadState(IEmulator *Emu, std::string file_path = std::string())
 {
+  if (!CheckSaveStatesSupported(Emu))
+    return;
+
   CBlockFile  SaveState;
 
   // Generate file path
   if (file_path.empty())
-    file_path = Util::Format() << "Saves/" << Model3->GetGame().name << ".st" << s_saveSlot;
+    file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << Emu->GetGame().name << ".st" << s_saveSlot;
 
   // Open and check to make sure format is correct
   if (Result::OKAY != SaveState.Load(file_path))
@@ -631,18 +782,18 @@ static void LoadState(IEmulator *Model3, std::string file_path = std::string())
   }
 
   // Load
-  Model3->LoadState(&SaveState);
+  Emu->LoadState(&SaveState);
   SaveState.Close();
   printf("Loaded state from '%s'.\n", file_path.c_str());
-  DebugLog("Loaded state from '%s'.\n", file_path.c_str());
+  InfoLog("Loaded state from '%s'.", file_path.c_str());
 }
 
-static void SaveNVRAM(IEmulator *Model3)
+static void SaveNVRAM(IEmulator *Emu)
 {
   CBlockFile  NVRAM;
 
-  std::string file_path = Util::Format() << "NVRAM/" << Model3->GetGame().name << ".nv";
-  if (Result::OKAY != NVRAM.Create(file_path, "Supermodel NVRAM State", "Supermodel Version " SUPERMODEL_VERSION))
+  std::string file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::NVRAM) << Emu->GetGame().name << ".nv";
+  if (Result::OKAY != NVRAM.Create(file_path, "Supermodel NVRAM State", "Supermodel Version " + SupermodelVersion()))
   {
     ErrorLog("Unable to save NVRAM to '%s'. Make sure directory exists!", file_path.c_str());
     return;
@@ -651,20 +802,20 @@ static void SaveNVRAM(IEmulator *Model3)
   // Write file format version and ROM set ID to header block
   int32_t fileVersion = NVRAM_FILE_VERSION;
   NVRAM.Write(&fileVersion, sizeof(fileVersion));
-  NVRAM.Write(Model3->GetGame().name);
+  NVRAM.Write(Emu->GetGame().name);
 
   // Save NVRAM
-  Model3->SaveNVRAM(&NVRAM);
+  Emu->SaveNVRAM(&NVRAM);
   NVRAM.Close();
-  DebugLog("Saved NVRAM to '%s'.\n", file_path.c_str());
+  InfoLog("Saved NVRAM to '%s'.", file_path.c_str());
 }
 
-static void LoadNVRAM(IEmulator *Model3)
+static void LoadNVRAM(IEmulator *Emu)
 {
   CBlockFile  NVRAM;
 
   // Generate file path
-  std::string file_path = Util::Format() << "NVRAM/" << Model3->GetGame().name << ".nv";
+  std::string file_path = Util::Format() << FileSystemPath::GetPath(FileSystemPath::NVRAM) << Emu->GetGame().name << ".nv";
 
   // Open and check to make sure format is correct
   if (Result::OKAY != NVRAM.Load(file_path))
@@ -688,88 +839,11 @@ static void LoadNVRAM(IEmulator *Model3)
   }
 
   // Load
-  Model3->LoadNVRAM(&NVRAM);
+  Emu->LoadNVRAM(&NVRAM);
   NVRAM.Close();
-  DebugLog("Loaded NVRAM from '%s'.\n", file_path.c_str());
+  InfoLog("Loaded NVRAM from '%s'.", file_path.c_str());
 }
 
-
-/******************************************************************************
- UI Rendering
-
- Currently, only does crosshairs for light gun games.
-******************************************************************************/
-
-static void GunToViewCoords(float *x, float *y)
-{
-  *x = (*x-150.0f)/(651.0f-150.0f); // Scale [150,651] -> [0.0,1.0]
-  *y = (*y-80.0f)/(465.0f-80.0f);   // Scale [80,465] -> [0.0,1.0]
-}
-
-static void DrawCrosshair(float x, float y, float r, float g, float b)
-{
-  float base = 0.01f, height = 0.02f; // geometric parameters of each triangle
-  float dist = 0.004f;          // distance of triangle tip from center
-  float a = (float)xRes/(float)yRes;  // aspect ratio (to square the crosshair)
-
-  glColor3f(r, g, b);
-  glVertex2f(x, y+dist);  // bottom triangle
-  glVertex2f(x+base/2.0f, y+(dist+height)*a);
-  glVertex2f(x-base/2.0f, y+(dist+height)*a);
-  glVertex2f(x, y-dist);  // top triangle
-  glVertex2f(x-base/2.0f, y-(dist+height)*a);
-  glVertex2f(x+base/2.0f, y-(dist+height)*a);
-  glVertex2f(x-dist, y);  // left triangle
-  glVertex2f(x-dist-height, y+(base/2.0f)*a);
-  glVertex2f(x-dist-height, y-(base/2.0f)*a);
-  glVertex2f(x+dist, y);  // right triangle
-  glVertex2f(x+dist+height, y-(base/2.0f)*a);
-  glVertex2f(x+dist+height, y+(base/2.0f)*a);
-}
-
-static void DrawBorder(bool boost)
-{
-  float f = 0.0f, w = 0.0f, z = 0.0f;
-  glViewport(xOffset, yOffset, xRes, yRes); // Same viewport as crosshairs
-  glColor3f(1.0f,1.0f,1.0f); // White Border
-  glPointSize(1.0f);
-
-  if (boost) {
-      f = 0.006f;
-      z = 0.0015f;
-  }
-
-  glBegin(GL_TRIANGLES);
-  w = float(0.022f + (f + z)); //top
-  glVertex2f(0.0f, w);
-  glVertex2f(0.0f, 0.0f);
-  glVertex2f(1.0f, 0.0f);
-  glVertex2f(1.0f, 0.0f);
-  glVertex2f(1.0f, w);
-  glVertex2f(0.0f, w);
-  w = float(0.984f - f); //right
-  glVertex2f(w, 1.0f);
-  glVertex2f(w, 0.0f);
-  glVertex2f(1.0f, 0.0f);
-  glVertex2f(1.0f, 0.0f);
-  glVertex2f(1.0f, 1.0f);
-  glVertex2f(w, 1.0f);
-  w = float(0.978f - (f + z)); //bottom
-  glVertex2f(0.0f, 1.0f);
-  glVertex2f(0.0f, w);
-  glVertex2f(1.0f, w);
-  glVertex2f(1.0f, w);
-  glVertex2f(1.0f, 1.0f);
-  glVertex2f(0.0f, 1.0f);
-  w = float(0.016f + f); //left
-  glVertex2f(0.0f, 1.0f);
-  glVertex2f(0.0f, 0.0f);
-  glVertex2f(w, 0.0f);
-  glVertex2f(w, 0.0f);
-  glVertex2f(w, 1.0f);
-  glVertex2f(0.0f, 1.0f);
-  glEnd();
-}
 
 /*
 static void PrintGLError(GLenum error)
@@ -789,76 +863,6 @@ static void PrintGLError(GLenum error)
 }
 */
 
-static void UpdateVideoInput(uint32_t currentInputs, CInputs *Inputs, unsigned crosshairs, unsigned borders)
-
-{
-  crosshairs &= 3;
-  borders &= 3;
-  if (!crosshairs && !borders)
-    return;
-
-  bool offscreenTrigger[2];
-  float x[2], y[2];
-
-  // Set up the viewport and orthogonal projection
-  glUseProgram(0);    // no shaders
-  glViewport(xOffset, yOffset, xRes, yRes);
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  gluOrtho2D(0.0, 1.0, 1.0, 0.0);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  glDisable(GL_TEXTURE_2D); // no texture mapping
-  glDisable(GL_BLEND);    // no blending
-  glDisable(GL_DEPTH_TEST); // no Z-buffering needed
-  glDisable(GL_LIGHTING);
-
-  // Convert gun coordinates to viewspace coordinates
-  if (crosshairs) {
-      if (currentInputs & Game::INPUT_ANALOG_GUN1)
-      {
-        x[0] = ((float)Inputs->analogGunX[0]->value / 255.0f);
-        y[0] = ((255.0f - (float)Inputs->analogGunY[0]->value) / 255.0f);
-        offscreenTrigger[0] = Inputs->analogTriggerLeft[0]->value || Inputs->analogTriggerRight[0]->value;
-      }
-      else if (currentInputs & Game::INPUT_GUN1)
-      {
-        x[0] = (float)Inputs->gunX[0]->value;
-        y[0] = (float)Inputs->gunY[0]->value;
-        GunToViewCoords(&x[0], &y[0]);
-	offscreenTrigger[0] = (Inputs->trigger[0]->offscreenValue) > 0;
-      }
-      if (currentInputs & Game::INPUT_ANALOG_GUN2)
-      {
-        x[1] = ((float)Inputs->analogGunX[1]->value / 255.0f);
-        y[1] = ((255.0f - (float)Inputs->analogGunY[1]->value) / 255.0f);
-        offscreenTrigger[1] = Inputs->analogTriggerLeft[1]->value || Inputs->analogTriggerRight[1]->value;
-      }
-      else if (currentInputs & Game::INPUT_GUN2)
-      {
-        x[1] = (float)Inputs->gunX[1]->value;
-        y[1] = (float)Inputs->gunY[1]->value;
-        GunToViewCoords(&x[1], &y[1]);
-	offscreenTrigger[1] = (Inputs->trigger[1]->offscreenValue) > 0;
-      }
-      glBegin(GL_TRIANGLES);
-      if ((crosshairs & 1) && !offscreenTrigger[0])  // Player 1
-        DrawCrosshair(x[0], y[0], 1.0f, 0.0f, 0.0f);
-      if ((crosshairs & 2) && !offscreenTrigger[1])  // Player 2
-        DrawCrosshair(x[1], y[1], 0.0f, 1.0f, 0.0f);
-      glEnd();
-  }
-
-  // Border width
-  if (borders & 2)
-       DrawBorder(true);
-  else if (borders & 1)
-       DrawBorder(false);
-
-  //PrintGLError(glGetError());
-}
-
-
 /******************************************************************************
  Video Callbacks
 ******************************************************************************/
@@ -874,8 +878,8 @@ bool BeginFrameVideo()
 void EndFrameVideo()
 {
   // Show crosshairs for light gun games
-  UpdateVideoInput(currentInputs, videoInputs, s_runtime_config["Crosshairs"].ValueAs<unsigned>(),
-		    s_runtime_config["Border"].ValueAs<unsigned>());
+  if (videoInputs)
+    s_crosshair->Update(currentInputs, videoInputs, xOffset, yOffset, xRes, yRes);
 
   // Swap the buffers
   SDL_GL_SwapWindow(s_window);
@@ -893,37 +897,40 @@ static uint64_t GetDesiredRefreshRateMilliHz()
   // The refresh rate is expressed as mHz (millihertz -- Hz * 1000) in order to
   // be expressable as an integer. E.g.: 57.524 Hz -> 57524 mHz.
   float refreshRateHz = std::abs(s_runtime_config["RefreshRate"].ValueAs<float>());
-  uint64_t refreshRateMilliHz = uint64_t(1000.0f * refreshRateHz);
+  uint64_t refreshRateMilliHz = uint64_t(1000.0 * refreshRateHz);
   return refreshRateMilliHz;
 }
 
-static void SuperSleepUntil(uint64_t target)
+static void SuperSleepUntil(const uint64_t target)
 {
   uint64_t time = SDL_GetPerformanceCounter();
 
   // If we're ahead of the target, we're done
-  if (time > target)
+  if (time >= target)
   {
     return;
   }
 
-  // Compute the whole number of millis to sleep. Because OS sleep is not accurate,
-  // we actually sleep for one less and will spin-wait for the final millisecond.
-  int32_t numWholeMillisToSleep = int32_t((target - time) * 1000 / s_perfCounterFrequency);
-  numWholeMillisToSleep -= 1;
-  if (numWholeMillisToSleep > 0)
+  // Because OS sleep is not accurate,
+  // we actually sleep until a maximum of 2 milliseconds are left.
+  while (int64_t(target - time) * 1000 > 2 * int64_t(s_perfCounterFrequency))
   {
-    SDL_Delay(numWholeMillisToSleep);
+    SDL_Delay(1);
+    time = SDL_GetPerformanceCounter();
   }
 
   // Spin until requested time
-  volatile uint64_t now;
-  int32_t remain;
+  int64_t remain;
   do
   {
-    now = SDL_GetPerformanceCounter();
-    remain = int32_t((target - now));
-  } while (remain>0);
+    // according to all available processor documentation for x86 and arm,
+    // spinning should pause the processor for a short while for better
+    // power efficiency and (surprisingly) overall faster system performance
+    #ifdef SDL_CPUPauseInstruction
+    SDL_CPUPauseInstruction();
+    #endif
+    remain = target - SDL_GetPerformanceCounter();
+  } while (remain > 0);
 }
 
 
@@ -931,12 +938,22 @@ static void SuperSleepUntil(uint64_t target)
  Main Program Loop
 ******************************************************************************/
 
+// Creates the 2D layer renderer that the emulator needs
+static IRender2D *CreateRender2D(IEmulator *Emu)
+{
+  if (dynamic_cast<CPro1000 *>(Emu))
+    return new CPro1000Render2D();
+  if (dynamic_cast<CModel1 *>(Emu) || dynamic_cast<CModel2 *>(Emu))
+    return new CModel1Render();
+  return new CRender2D(s_runtime_config);
+}
+
 #ifdef SUPERMODEL_DEBUGGER
-int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *Inputs, COutputs *Outputs, std::shared_ptr<Debugger::CDebugger> Debugger)
+int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Inputs, COutputs *Outputs, std::shared_ptr<Debugger::CDebugger> Debugger)
 {
   std::shared_ptr<CLogger> oldLogger;
 #else
-int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *Inputs, COutputs *Outputs)
+int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Emu, CInputs *Inputs, COutputs *Outputs)
 {
 #endif // SUPERMODEL_DEBUGGER
   std::string initialState = s_runtime_config["InitStateFile"].ValueAs<std::string>();
@@ -948,24 +965,40 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   bool        dumpTimings = false;
 
   // Initialize and load ROMs
-  if (Result::OKAY != Model3->Init())
-    return 1;
-  if (Model3->LoadGame(game, *rom_set) != Result::OKAY)
+  if (Result::OKAY != Emu->Init(game, *rom_set))
     return 1;
   *rom_set = ROMSet();  // free up this memory we won't need anymore
 
+  // Customized music for games with MPEG boards
+  MpegDec::LoadCustomTracks(s_musicXMLFilePath, game);
+
   // Load NVRAM
-  LoadNVRAM(Model3);
+  LoadNVRAM(Emu);
 
   // Set the video mode
   char baseTitleStr[128];
   char titleStr[128];
   totalXRes = xRes = s_runtime_config["XResolution"].ValueAs<unsigned>();
   totalYRes = yRes = s_runtime_config["YResolution"].ValueAs<unsigned>();
-  sprintf(baseTitleStr, "Supermodel - %s", game.title.c_str());
+  snprintf(baseTitleStr, sizeof(baseTitleStr), "Supermodel - %s", game.title.c_str());
   SDL_SetWindowTitle(s_window, baseTitleStr);
   SDL_SetWindowSize(s_window, totalXRes, totalYRes);
-  SDL_SetWindowPosition(s_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+
+  int xpos = s_runtime_config["WindowXPosition"].ValueAsDefault<int>(SDL_WINDOWPOS_CENTERED);
+  int ypos = s_runtime_config["WindowYPosition"].ValueAsDefault<int>(SDL_WINDOWPOS_CENTERED);
+  SDL_SetWindowPosition(s_window, xpos, ypos);
+
+  if (s_runtime_config["BorderlessWindow"].ValueAs<bool>())
+  {
+    SDL_SetWindowBordered(s_window, SDL_FALSE);
+  }
+
+  // The window can be resized and maximized; the renderers follow its size
+  // (see the main loop)
+  SDL_SetWindowResizable(s_window, SDL_TRUE);
+
+  SetFullScreenRefreshRate();
+
   bool stretch = s_runtime_config["Stretch"].ValueAs<bool>();
   bool fullscreen = s_runtime_config["FullScreen"].ValueAs<bool>();
   if (Result::OKAY != ResizeGLScreen(&xOffset, &yOffset ,&xRes, &yRes, &totalXRes, &totalYRes, !stretch, fullscreen))
@@ -981,22 +1014,13 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
   // Hide mouse if fullscreen, enable crosshairs for gun games
   Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
-  if (!s_runtime_config["FullScreen"].ValueAs<bool>())
-      Inputs->GetInputSystem()->SetMouseVisibility(s_runtime_config["MouseCursor"].ValueAs<bool>());
   gameHasLightguns = !!(game.inputs & (Game::INPUT_GUN1|Game::INPUT_GUN2));
   gameHasLightguns |= game.name == "lostwsga";
   currentInputs = game.inputs;
-  if (gameHasLightguns || s_runtime_config["Border"].ValueAs<unsigned>())
-      videoInputs = Inputs;
+  if (gameHasLightguns)
+    videoInputs = Inputs;
   else
-      videoInputs = NULL;
-
-  // Attach the inputs to the emulator
-  Model3->AttachInputs(Inputs);
-
-  // Attach the outputs to the emulator
-  if (Outputs != NULL)
-    Model3->AttachOutputs(Outputs);
+    videoInputs = nullptr;
 
   // Frame timing
   s_perfCounterFrequency = SDL_GetPerformanceFrequency();
@@ -1004,20 +1028,31 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   uint64_t nextTime = 0;
 
   // Initialize the renderers
-  CRender2D *Render2D = new CRender2D(s_runtime_config);
-  IRender3D *Render3D = s_runtime_config["New3DEngine"].ValueAs<bool>() ? ((IRender3D *) new New3D::CNew3D(s_runtime_config, Model3->GetGame().name)) : ((IRender3D *) new Legacy3D::CLegacy3D(s_runtime_config));
-  if (Result::OKAY != Render2D->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes))
+  SuperAA* superAA = new SuperAA(aaValue, CRTcolors);
+  superAA->Init(totalXRes, totalYRes);  // pass actual frame sizes here
+  IRender2D *Render2D = CreateRender2D(Emu);
+#ifndef SUPERMODEL_OSX
+  IRender3D *Render3D = s_runtime_config["New3DEngine"].ValueAs<bool>() ? ((IRender3D *) new New3D::CNew3D(s_runtime_config, Emu->GetGame().name)) : ((IRender3D *) new Legacy3D::CLegacy3D(s_runtime_config));
+#else
+  // Legacy renderer is not supported on Mac, always use new engine
+  IRender3D *Render3D = (IRender3D *) new New3D::CNew3D(s_runtime_config, Emu->GetGame().name);
+#endif
+
+  UpscaleMode upscaleMode = (UpscaleMode)s_runtime_config["UpscaleMode"].ValueAs<int>();
+
+  if (Result::OKAY != Render2D->Init(xOffset*aaValue, yOffset*aaValue, xRes*aaValue, yRes*aaValue, totalXRes*aaValue, totalYRes*aaValue, superAA->GetTargetID(), upscaleMode))
     goto QuitError;
-  if (Result::OKAY != Render3D->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes))
+  if (Result::OKAY != Render3D->Init(xOffset*aaValue, yOffset*aaValue, xRes*aaValue, yRes*aaValue, totalXRes*aaValue, totalYRes*aaValue, superAA->GetTargetID()))
     goto QuitError;
-  Model3->AttachRenderers(Render2D,Render3D);
+
+  Emu->AttachRenderers(Render2D,Render3D, superAA);
 
   // Reset emulator
-  Model3->Reset();
+  Emu->Reset();
 
   // Load initial save state if requested
-  if (initialState.length() > 0)
-    LoadState(Model3, initialState);
+  if (!initialState.empty())
+    LoadState(Emu, initialState);
 
 #ifdef SUPERMODEL_DEBUGGER
   // If debugger was supplied, set it as logger and attach it to system
@@ -1036,9 +1071,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   paused = false;
   dumpTimings = false;
 #ifdef DEBUG
-  if (dynamic_cast<CModel3GraphicsState *>(Model3))
+  if (dynamic_cast<CModel3GraphicsState *>(Emu))
   {
-    TestPolygonHeaderBits(Model3);
+    TestPolygonHeaderBits(Emu);
     quit = true;
   }
 #endif
@@ -1050,9 +1085,54 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
     // Render if paused, otherwise run a frame
     if (paused)
-      Model3->RenderFrame();
+      Emu->RenderFrame();
     else
-      Model3->RunFrame();
+      Emu->RunFrame();
+
+    // Window resized or maximized: when its new size has stayed the same for
+    // a few frames (not every step of a drag), the renderers are created
+    // again for it, as when toggling full screen
+    if (!s_runtime_config["FullScreen"].ValueAs<bool>())
+    {
+      static int s_resizeW = 0, s_resizeH = 0, s_resizeFrames = 0;
+      int w = 0, h = 0;
+      SDL_GetWindowSize(s_window, &w, &h);
+      if (w <= 0 || h <= 0 || (unsigned(w) == totalXRes && unsigned(h) == totalYRes))
+        s_resizeFrames = 0;
+      else if (w != s_resizeW || h != s_resizeH)
+      {
+        s_resizeW = w;
+        s_resizeH = h;
+        s_resizeFrames = 0;
+      }
+      else if (++s_resizeFrames >= 3)
+      {
+        s_resizeFrames = 0;
+        if (!paused)
+          Emu->PauseThreads();
+
+        delete Render2D;
+        Render2D = nullptr;
+
+        totalXRes = xRes = unsigned(w);
+        totalYRes = yRes = unsigned(h);
+        if (Result::OKAY != SetGLGeometry(&xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, !s_runtime_config["Stretch"].ValueAs<bool>()))
+          goto QuitError;
+
+        superAA->Init(totalXRes, totalYRes);
+        Render2D = CreateRender2D(Emu);
+        if (Result::OKAY != Render2D->Init(xOffset * aaValue, yOffset * aaValue, xRes * aaValue, yRes * aaValue, totalXRes * aaValue, totalYRes * aaValue, superAA->GetTargetID(), upscaleMode))
+          goto QuitError;
+        if (Result::OKAY != Render3D->Init(xOffset * aaValue, yOffset * aaValue, xRes * aaValue, yRes * aaValue, totalXRes * aaValue, totalYRes * aaValue, superAA->GetTargetID()))
+          goto QuitError;
+        Emu->AttachRenderers(Render2D, Render3D, superAA);
+
+        if (!paused)
+          Emu->ResumeThreads();
+        else
+          Emu->RenderFrame();   // paused: show the frame at the new size
+      }
+    }
 
 #ifdef SUPERMODEL_DEBUGGER
     bool processUI = true;
@@ -1086,12 +1166,12 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     {
       if (!paused)
       {
-        Model3->PauseThreads();
+        Emu->PauseThreads();
         SetAudioEnabled(false);
       }
 
       // Reset emulator
-      Model3->Reset();
+      Emu->Reset();
 
 #ifdef SUPERMODEL_DEBUGGER
       // If debugger was supplied, reset it too
@@ -1101,11 +1181,11 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       if (!paused)
       {
-        Model3->ResumeThreads();
+        Emu->ResumeThreads();
         SetAudioEnabled(true);
       }
 
-      puts("Model 3 reset.");
+      puts("Emulator reset.");
     }
     else if (Inputs->uiPause->Pressed())
     {
@@ -1114,14 +1194,14 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       if (paused)
       {
-        Model3->PauseThreads();
+        Emu->PauseThreads();
         SetAudioEnabled(false);
-        sprintf(titleStr, "%s (Paused)", baseTitleStr);
+        snprintf(titleStr, sizeof(titleStr), "%s (Paused)", baseTitleStr);
         SDL_SetWindowTitle(s_window, titleStr);
       }
       else
       {
-        Model3->ResumeThreads();
+        Emu->ResumeThreads();
         SetAudioEnabled(true);
         SDL_SetWindowTitle(s_window, baseTitleStr);
       }
@@ -1137,45 +1217,43 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       // Delete renderers and recreate them afterwards since GL context will most likely be lost when switching from/to fullscreen
       delete Render2D;
-      delete Render3D;
-      Render2D = NULL;
-      Render3D = NULL;
+      Render2D = nullptr;
 
       // Resize screen
       totalXRes = xRes = s_runtime_config["XResolution"].ValueAs<unsigned>();
       totalYRes = yRes = s_runtime_config["YResolution"].ValueAs<unsigned>();
-      bool stretch = s_runtime_config["Stretch"].ValueAs<bool>();
-      bool fullscreen = s_runtime_config["FullScreen"].ValueAs<bool>();
-      if (Result::OKAY != ResizeGLScreen(&xOffset,&yOffset,&xRes,&yRes,&totalXRes,&totalYRes,!stretch,fullscreen))
+      bool stretchc = s_runtime_config["Stretch"].ValueAs<bool>();
+      bool fullscreenc = s_runtime_config["FullScreen"].ValueAs<bool>();
+      if (Result::OKAY != ResizeGLScreen(&xOffset,&yOffset,&xRes,&yRes,&totalXRes,&totalYRes,!stretchc,fullscreenc))
         goto QuitError;
 
       // Recreate renderers and attach to the emulator
-      Render2D = new CRender2D(s_runtime_config);
-      Render3D = s_runtime_config["New3DEngine"].ValueAs<bool>() ? ((IRender3D *) new New3D::CNew3D(s_runtime_config, Model3->GetGame().name)) : ((IRender3D *) new Legacy3D::CLegacy3D(s_runtime_config));
-      if (Result::OKAY != Render2D->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes))
+      superAA->Init(totalXRes, totalYRes);
+      Render2D = CreateRender2D(Emu);
+
+      if (Result::OKAY != Render2D->Init(xOffset * aaValue, yOffset * aaValue, xRes * aaValue, yRes * aaValue, totalXRes * aaValue, totalYRes * aaValue, superAA->GetTargetID(), upscaleMode))
         goto QuitError;
-      if (Result::OKAY != Render3D->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes))
+      if (Result::OKAY != Render3D->Init(xOffset * aaValue, yOffset * aaValue, xRes * aaValue, yRes * aaValue, totalXRes * aaValue, totalYRes * aaValue, superAA->GetTargetID()))
         goto QuitError;
-      Model3->AttachRenderers(Render2D,Render3D);
+
+      Emu->AttachRenderers(Render2D, Render3D, superAA);
 
       Inputs->GetInputSystem()->SetMouseVisibility(!s_runtime_config["FullScreen"].ValueAs<bool>());
-      if (!s_runtime_config["FullScreen"].ValueAs<bool>())
-          Inputs->GetInputSystem()->SetMouseVisibility(s_runtime_config["MouseCursor"].ValueAs<bool>());
     }
     else if (Inputs->uiSaveState->Pressed())
     {
       if (!paused)
       {
-        Model3->PauseThreads();
+        Emu->PauseThreads();
         SetAudioEnabled(false);
       }
 
       // Save game state
-      SaveState(Model3);
+      SaveState(Emu);
 
       if (!paused)
       {
-        Model3->ResumeThreads();
+        Emu->ResumeThreads();
         SetAudioEnabled(true);
       }
     }
@@ -1190,12 +1268,12 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     {
       if (!paused)
       {
-        Model3->PauseThreads();
+        Emu->PauseThreads();
         SetAudioEnabled(false);
       }
 
       // Load game state
-      LoadState(Model3);
+      LoadState(Emu);
 
 #ifdef SUPERMODEL_DEBUGGER
       // If debugger was supplied, reset it after loading state
@@ -1205,14 +1283,14 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
       if (!paused)
       {
-        Model3->ResumeThreads();
+        Emu->ResumeThreads();
         SetAudioEnabled(true);
       }
     }
     else if (Inputs->uiMusicVolUp->Pressed())
     {
       // Increase music volume by 10%
-      if (!Model3->GetGame().mpeg_board.empty())
+      if (Emu->GetGame().mpeg_board != Game::MPEG_BOARD_NONE)
       {
         int vol = (std::min)(200, s_runtime_config["MusicVolume"].ValueAs<int>() + 10);
         s_runtime_config.Get("MusicVolume").SetValue(vol);
@@ -1228,7 +1306,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     else if (Inputs->uiMusicVolDown->Pressed())
     {
       // Decrease music volume by 10%
-      if (!Model3->GetGame().mpeg_board.empty())
+      if (Emu->GetGame().mpeg_board != Game::MPEG_BOARD_NONE)
       {
         int vol = (std::max)(0, s_runtime_config["MusicVolume"].ValueAs<int>() - 10);
         s_runtime_config.Get("MusicVolume").SetValue(vol);
@@ -1289,7 +1367,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     else if (Inputs->uiClearNVRAM->Pressed())
     {
       // Clear NVRAM
-      Model3->ClearNVRAM();
+      Emu->ClearNVRAM();
       puts("NVRAM cleared.");
     }
     else if (Inputs->uiToggleFrLimit->Pressed())
@@ -1327,9 +1405,9 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       uint64_t measurementTicks = currentFPSTicks - prevFPSTicks;
       if (measurementTicks >= s_perfCounterFrequency) // update FPS every 1 second (s_perfCounterFrequency is how many perf ticks in one second)
       {
-        float fps = float(fpsFramesElapsed) / (float(measurementTicks) / float(s_perfCounterFrequency));
-        sprintf(titleStr, "- Framerate: %1.3f FPS%s", fps, paused ? " (Paused)" : "");
-        std::cout << titleStr << std::endl;
+        double fps = double(fpsFramesElapsed) / (double(measurementTicks) / double(s_perfCounterFrequency));
+        snprintf(titleStr, sizeof(titleStr), "%s - %1.3f FPS%s", baseTitleStr, fps, paused ? " (Paused)" : "");
+        SDL_SetWindowTitle(s_window, titleStr);
         prevFPSTicks = currentFPSTicks;   // reset tick count
         fpsFramesElapsed = 0;             // reset frame count
       }
@@ -1337,14 +1415,15 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 
     if (dumpTimings && !paused)
     {
-      CModel3 *M = dynamic_cast<CModel3 *>(Model3);
-      if (M)
+      if (CModel3 *M = dynamic_cast<CModel3 *>(Emu))
         M->DumpTimings();
+      else if (CPro1000 *P = dynamic_cast<CPro1000 *>(Emu))
+        P->DumpTimings();
     }
   }
 
   // Make sure all threads are paused before shutting down
-  Model3->PauseThreads();
+  Emu->PauseThreads();
 
 #ifdef SUPERMODEL_DEBUGGER
   // If debugger was supplied, detach it from system and restore old logger
@@ -1356,7 +1435,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 #endif // SUPERMODEL_DEBUGGER
 
   // Save NVRAM
-  SaveNVRAM(Model3);
+  SaveNVRAM(Emu);
 
   // Close audio
   CloseAudio();
@@ -1364,6 +1443,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // Shut down renderers
   delete Render2D;
   delete Render3D;
+  delete superAA;
 
   return 0;
 
@@ -1371,26 +1451,44 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
 QuitError:
   delete Render2D;
   delete Render3D;
+  delete superAA;
+
   return 1;
 }
 
 
 /******************************************************************************
- Entry Point and Command Line Procesing
+ Entry Point and Command Line Processing
 ******************************************************************************/
 
-static const char s_configFilePath[] = { "Config/Supermodel.ini" };
-static const char s_gameXMLFilePath[] = { "Config/Games.xml" };
+// Configuration file is generated whenever it is not present. We no longer
+// distribute it with Supermodel to make it easier to upgrade Supermodel from
+// .zip archives without accidentally overwriting the configuration.
+static void WriteDefaultConfigurationFileIfNotPresent()
+{
+    // Test whether file exists by opening it
+    FILE* fp = fopen(s_configFilePath.c_str(), "r");
+    if (fp)
+    {
+        fclose(fp);
+        return;
+    }
+
+    // Write config
+    fp = fopen(s_configFilePath.c_str(), "w");
+    if (!fp)
+    {
+        ErrorLog("Unable to write default configuration file to %s", s_configFilePath.c_str());
+        return;
+    }
+    fputs(DefaultConfigFileContents().c_str(), fp);
+    fclose(fp);
+    InfoLog("Wrote default configuration file to %s", s_configFilePath.c_str());
+}
 
 // Create and configure inputs
 static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, Util::Config::Node *runtimeConfig, const Game &game, bool configure)
 {
-  static const char configFileComment[] = {
-    ";\n"
-    "; Supermodel Configuration File\n"
-    ";\n"
-  };
-
   Inputs->LoadFromConfig(*runtimeConfig);
 
   // If the user wants to configure the inputs, do that now
@@ -1417,7 +1515,7 @@ static Result ConfigureInputs(CInputs *Inputs, Util::Config::Node *fileConfig, U
     {
       // Write input configuration and input system settings to config file
       Inputs->StoreToConfig(fileConfigRoot);
-      Util::Config::WriteINIFile(s_configFilePath, *fileConfig, configFileComment);
+      Util::Config::WriteINIFile(s_configFilePath, *fileConfig, TimestampedConfigFileComment("Updated from input configuration."));
 
       // Also save to runtime configuration in case we proceed and play
       Inputs->StoreToConfig(runtimeConfig);
@@ -1440,13 +1538,13 @@ static void PrintGameList(const std::string &xml_file, const std::map<std::strin
   }
   printf("Games defined in %s:\n", xml_file.c_str());
   puts("");
-  puts("    ROM Set         Title");
-  puts("    -------         -----");
+  puts("    ROM Set          Title");
+  puts("    -------          -----");
   for (auto &v: games)
   {
     const Game &game = v.second;
     printf("    %s", game.name.c_str());
-    for (int i = game.name.length(); i < 9; i++)  // pad for alignment (no game ID should be more than 9 letters)
+    for (size_t i = game.name.length(); i < 10; i++)  // pad for alignment
       printf(" ");
     if (!game.version.empty())
       printf("       %s (%s)\n", game.title.c_str(), game.version.c_str());
@@ -1468,154 +1566,430 @@ static void LogConfig(const Util::Config::Node &config)
   InfoLog("");
 }
 
-static Util::Config::Node DefaultConfig()
+Util::Config::Node DefaultConfig()
 {
   Util::Config::Node config("Global");
+
+  // Names the GUI shows for a setting's list of values, in list order (the config file keeps the values)
+  auto SetLabels = [&config](const std::string& key, const std::vector<std::string>& labels)
+  {
+    config[key].GetValue()->GetValueRange()->SetLabels(labels);
+  };
+
   config.Set("GameXMLFile", s_gameXMLFilePath);
   config.Set("InitStateFile", "");
   // CModel3
-  config.Set("MultiThreaded", true);
-  config.Set("GPUMultiThreaded", true);
-  config.Set("PowerPCFrequency", "50");
+  config.Set("PowerPCFrequency", 0u, "Core", 0u, 200u);
+  config["PowerPCFrequency"].GetValue()->GetValueRange()->SetSliderFormat("%u MHz", "Auto"); // 0 = chosen by default game stepping
+  config["PowerPCFrequency"].GetValue()->GetValueRange()->SetNote("Model 3 only");
+  config.Set("MultiThreaded", true,"Core");
+  config.Set("GPUMultiThreaded", true, "Core");
+  config.Set("IdleSkip", true, "Core");
+  // CModel1, CModel2: the video board's geometrizer simulated (high level,
+  // fast), else its DSP programs run (low level, more accurate). Model 2:
+  // only 2B has the low level one (2A/2C are always simulated)
+  config.Set("HighLevelGeometrizer", true, "Core");
+  config["HighLevelGeometrizer"].GetValue()->GetValueRange()->SetNote("Model 1/2 only");
+  config.Set<std::string>("ROMDirectory", FileSystemPath::GetPath(FileSystemPath::ROMs), "Core", "", ""); // where the GUI looks for <romset>.zip
   // 2D and 3D graphics engines
-  config.Set("MultiTexture", false);
-  config.Set("VertexShader", "");
-  config.Set("FragmentShader", "");
-  config.Set("VertexShaderFog", "");
-  config.Set("FragmentShaderFog", "");
-  config.Set("VertexShader2D", "");
-  config.Set("FragmentShader2D", "");
+#ifndef SUPERMODEL_OSX
+  config.Set("MultiTexture", false, "Legacy3D");
+  config.Set<std::string>("VertexShader", "", "Legacy3D", "", "");
+  config.Set<std::string>("FragmentShader", "", "Legacy3D", "", "");
+#endif
+
   // CSoundBoard
-  config.Set("EmulateSound", true);
-  config.Set("Balance", "0");
-  config.Set("BalanceLeftRight", "0");
-  config.Set("BalanceFrontRear", "0");
-  config.Set("NbSoundChannels", "4");
-  config.Set("SoundFreq", "57.6"); // 60.0f? 57.524160f?
+  config.Set("EmulateSound", true, "Sound");
+  config.Set("Balance", 0.0f, "Sound", -100.f, 100.f);
+  config.Set("BalanceLeftRight", 0.0f, "Sound", -100.f, 100.f);
+  config.Set("BalanceFrontRear", 0.0f, "Sound", -100.f, 100.f);
+  config.Set("NbSoundChannels", 4, "Sound", 0, 0, { 1,2,4 });
+  SetLabels("NbSoundChannels", { "Mono", "Stereo", "Quad (4 channels)" });
   // CDSB
-  config.Set("EmulateDSB", true);
-  config.Set("SoundVolume", "100");
-  config.Set("MusicVolume", "100");
-  // Other sound options
-  config.Set("LegacySoundDSP", false); // New config option for games that do not play correctly with MAME's SCSP sound core.
+
+  config.Set("EmulateDSB", true, "Sound");
+  config.Set("SoundVolume", 100, "Sound", 0, 200);
+  config.Set("MusicVolume", 100, "Sound", 0, 200);
   // CDriveBoard
-  config.Set("ForceFeedback", false);
+  config.Set("ForceFeedback", false, "ForceFeedback");
+
   // Platform-specific/UI
-  config.Set("New3DEngine", false);
-  config.Set("QuadRendering", false);
-  config.Set("XResolution", "496");
-  config.Set("YResolution", "384");
-  config.Set("FullScreen", false);
-  config.Set("WideScreen", false);
-  config.Set("Stretch", false);
-  config.Set("WideBackground", false);
-  config.Set("VSync", true);
-  config.Set("Throttle", true);
-  config.Set("RefreshRate", 60.0f);
-  config.Set("ShowFrameRate", false);
-  config.Set("Border", int(0));
-  config.Set("Crosshairs", int(0));
-  config.Set("MouseCursor", true);
-  config.Set("FlipStereo", false);
+  config.Set("New3DEngine", true, "Video");
+  config["New3DEngine"].GetValue()->GetValueRange()->SetNote("Model 3 only");
+  config.Set("QuadRendering", true, "Video");
+  config.Set("XResolution", 496, "Video");
+  config.Set("YResolution", 384, "Video");
+  config.SetEmpty("WindowXPosition");
+  config.SetEmpty("WindowYPosition");
+  config.Set("FullScreen", false, "Video");
+  config.Set("BorderlessWindow", false, "Video");
+  config.Set("Supersampling", 1, "Video", 1, 8);
+  config.Set("CRTcolors", int(0), "Video", 0, 0, { 0,1,2,3,4,5 });
+  SetLabels("CRTcolors", { "None", "ARI/D93 (JP games)", "PVM_20M2U/D93", "BT601_525/D93", "BT601_525/D65 (US games)", "BT601_625/D65 (EUR/AUS games)" });
+  config.Set("UpscaleMode", 2, "Video", 0, 0, { 0,1,2,3 });
+  SetLabels("UpscaleMode", { "None (sharp pixels)", "Biquintic", "Bilinear", "Bicubic" });
+  config.Set("WideScreen", false, "Video");
+  config.Set("Stretch", false, "Video");
+  config.Set("WideBackground", false, "Video");
+  config.Set("VSync", true, "Video");
+  config.Set("Throttle", true, "Video");
+  config.Set("RefreshRate", 60.0f, "Video", 0.0f, 0.0f, { 57.524f, 60.f });
+  SetLabels("RefreshRate", { "57.524 Hz (original hardware)", "60 Hz" });
+  config.Set("ShowFrameRate", false, "Video");
+  config.Set("Crosshairs", int(0), "Video", 0, 0, { 0,1,2,3 });
+  SetLabels("Crosshairs", { "None", "Player 1 only", "Player 2 only", "Players 1 & 2" });
+  config.Set<std::string>("CrosshairStyle", "vector", "Video", "", "", { "bmp","vector" });
+  SetLabels("CrosshairStyle", { "Bitmap", "Vector" });
+  config.Set("NoWhiteFlash", false, "Video");
+  config.Set("FlipStereo", false, "Sound");
 #ifdef SUPERMODEL_WIN32
-  config.Set("InputSystem", "dinput");
+  config.Set<std::string>("InputSystem", "dinput", "Core", "", "", { "sdl","sdlgamepad","dinput","xinput","rawinput" });
+  SetLabels("InputSystem", { "SDL (joystick)", "SDL (gamepad)", "DirectInput", "XInput", "Raw Input (multiple mice/keyboards)" });
   // DirectInput ForceFeedback
-  config.Set("DirectInputConstForceLeftMax", "100");
-  config.Set("DirectInputConstForceRightMax", "100");
-  config.Set("DirectInputSelfCenterMax", "100");
-  config.Set("DirectInputFrictionMax", "100");
-  config.Set("DirectInputVibrateMax", "100");
+  config.Set("DirectInputConstForceLeftMax", 100, "ForceFeedback", 0, 100);
+  config.Set("DirectInputConstForceRightMax", 100, "ForceFeedback", 0, 100);
+  config.Set("DirectInputSelfCenterMax", 100, "ForceFeedback", 0, 100);
+  config.Set("DirectInputFrictionMax", 100, "ForceFeedback", 0, 100);
+  config.Set("DirectInputVibrateMax", 100, "ForceFeedback", 0, 100);
   // XInput ForceFeedback
-  config.Set("XInputConstForceThreshold", "30");
-  config.Set("XInputConstForceMax", "100");
-  config.Set("XInputVibrateMax", "100");
-  config.Set("XInputStereoVibration", true);
+  config.Set("XInputConstForceThreshold", 30, "ForceFeedback", 0, 100);
+  config.Set("XInputConstForceMax", 100, "ForceFeedback", 0, 100);
+  config.Set("XInputVibrateMax", 100, "ForceFeedback", 0, 100);
+  config.Set("XInputStereoVibration", true, "ForceFeedback");
   // SDL ForceFeedback
-  config.Set("SDLConstForceMax", "100");
-  config.Set("SDLSelfCenterMax", "100");
-  config.Set("SDLFrictionMax", "100");
-  config.Set("SDLVibrateMax", "100");
-  config.Set("SDLConstForceThreshold", "30");
-#ifdef NET_BOARD
-  // NetBoard
-  config.Set("Network", false);
-  config.Set("SimulateNet", true);
-  config.Set("PortIn", unsigned(1970));
-  config.Set("PortOut", unsigned(1971));
-  config.Set("AddressOut", "127.0.0.1");
-#endif
+  config.Set("SDLConstForceMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLSelfCenterMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLFrictionMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLVibrateMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLConstForceThreshold", 30, "ForceFeedback", 0, 100);
 #else
-  config.Set("InputSystem", "sdl");
-  config.Set("ABSMiceOnly", false);
+  config.Set<std::string>("InputSystem", "sdl", "Core", "", "", { "sdl","sdlgamepad" });
+  SetLabels("InputSystem", { "SDL (joystick)", "SDL (gamepad)" });
   // SDL ForceFeedback
-  config.Set("SDLConstForceMax", "100");
-  config.Set("SDLSelfCenterMax", "100");
-  config.Set("SDLFrictionMax", "100");
-  config.Set("SDLVibrateMax", "100");
-  config.Set("SDLConstForceThreshold", "30");
+  config.Set("SDLConstForceMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLSelfCenterMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLFrictionMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLVibrateMax", 100, "ForceFeedback", 0, 100);
+  config.Set("SDLConstForceThreshold", 30, "ForceFeedback", 0, 100);
 #endif
-  config.Set("Outputs", "none");
-  config.Set("DumpTextures", false);
+  // Network. PortIn is the port of the network server (net board and PRO-1000
+  // SCSI TCP bridge). PortOut and AddressOut give the next net board machine.
+  config.Set("Network", false, "Network");
+  config.Set("SimulateNet", true, "Network");
+  config.Set("PortIn", unsigned(NetProtocol::DEFAULT_PORT), "Network");
+  config.Set("PortOut", unsigned(1971), "Network");
+  config.Set<std::string>("AddressOut", "127.0.0.1", "Network", "", "");
+
+#ifdef SUPERMODEL_WIN32
+  config.Set<std::string>("Outputs", "none", "Misc", "", "", { "none","win","net" });
+  SetLabels("Outputs", { "None", "Windows messages", "Network (TCP/UDP)" });
+#else
+  config.Set<std::string>("Outputs", "none", "Misc", "", "", { "none","net" });
+  SetLabels("Outputs", { "None", "Network (TCP/UDP)" });
+#endif
+  config.Set<bool>("OutputsWithLF", false, "Misc");
+  config.Set<unsigned int>("OutputsTCPPort", 8000, "Misc", 1024, 65535);
+  config.Set<unsigned int>("OutputsUDPBroadcastPort", 8001, "Misc", 1024, 65535);
+
+  config.Set("DumpMemory", false, "Misc");
+  config.Set("DumpTextures", false, "Misc");
+
+  //
+  // Input sensitivity
+  //
+  config.Set<unsigned>("InputDigitalSensitivity", DEFAULT_DIGITAL_SENSITIVITY, "Sensitivity", 0, 100);
+  config.Set<unsigned>("InputDigitalDecaySpeed", DEFAULT_DIGITAL_DECAYSPEED, "Sensitivity", 0, 100);
+  config.Set<unsigned>("InputKeySensitivity", DEFAULT_DIGITAL_SENSITIVITY, "Sensitivity", 0, 100);
+  config.Set<unsigned>("InputKeyDecaySpeed", DEFAULT_DIGITAL_DECAYSPEED, "Sensitivity", 0, 100);
+
+  config.Set<unsigned>("InputMouseXDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 99);
+  config.Set<unsigned>("InputMouseYDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 99);
+  config.Set<unsigned>("InputMouseZDeadZone", DEFAULT_MSE_DEADZONE, "Sensitivity", 0, 99);
+
+  // Joystick axes, for all joysticks (InputJoy<n>... settings for an individual joystick override these)
+  static const char* joyAxisIds[] = { "X", "Y", "Z", "RX", "RY", "RZ", "S1", "S2" };
+  for (const char* axis : joyAxisIds)
+    config.Set<unsigned>(std::string("InputJoy") + axis + "DeadZone", DEFAULT_JOY_DEADZONE, "Sensitivity", 0, 99);
+  for (const char* axis : joyAxisIds)
+    config.Set<unsigned>(std::string("InputJoy") + axis + "Saturation", DEFAULT_JOY_SATURATION, "Sensitivity", 1, 200);
+
+  //
+  // controls
+  //
+
+  // Common
+  config.Set<std::string>("InputStart1", "KEY_1,JOY1_BUTTON9", "Input", "", "");
+  config.Set<std::string>("InputStart2", "KEY_2,JOY2_BUTTON9", "Input", "", "");
+  config.Set<std::string>("InputCoin1", "KEY_3,JOY1_BUTTON10", "Input", "", "");
+  config.Set<std::string>("InputCoin2", "KEY_4,JOY2_BUTTON10", "Input", "", "");
+  config.Set<std::string>("InputServiceA", "KEY_5", "Input", "", "");
+  config.Set<std::string>("InputServiceB", "KEY_7", "Input", "", "");
+  config.Set<std::string>("InputTestA", "KEY_6", "Input", "", "");
+  config.Set<std::string>("InputTestB", "KEY_8", "Input", "", "");
+
+  // 4-way digital joysticks
+  config.Set<std::string>("InputJoyUp", "KEY_UP,JOY1_UP", "Input", "", "");
+  config.Set<std::string>("InputJoyDown", "KEY_DOWN,JOY1_DOWN", "Input", "", "");
+  config.Set<std::string>("InputJoyLeft", "KEY_LEFT,JOY1_LEFT", "Input", "", "");
+  config.Set<std::string>("InputJoyRight", "KEY_RIGHT,JOY1_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputJoyUp2", "JOY2_UP", "Input", "", "");
+  config.Set<std::string>("InputJoyDown2", "JOY2_DOWN", "Input", "", "");
+  config.Set<std::string>("InputJoyLeft2", "JOY2_LEFT", "Input", "", "");
+  config.Set<std::string>("InputJoyRight2", "JOY2_RIGHT", "Input", "", "");
+
+  // Fighting game buttons
+  config.Set<std::string>("InputPunch", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputKick", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputGuard", "KEY_D,JOY1_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputEscape", "KEY_F,JOY1_BUTTON4", "Input", "", "");
+  config.Set<std::string>("InputPunch2", "JOY2_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputKick2", "JOY2_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputGuard2", "JOY2_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputEscape2", "JOY2_BUTTON4", "Input", "", "");
+
+  // Spikeout buttons
+  config.Set<std::string>("InputShift", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputBeat", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputCharge", "KEY_D,JOY1_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputJump", "KEY_F,JOY1_BUTTON4", "Input", "", "");
+
+  // Virtua Striker buttons
+  config.Set<std::string>("InputShortPass", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputLongPass", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputShoot", "KEY_D,JOY1_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputShortPass2", "JOY2_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputLongPass2", "JOY2_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputShoot2", "JOY2_BUTTON3", "Input", "", "");
+
+  // Steering wheel
+  config.Set<std::string>("InputSteeringLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputSteeringRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputSteering", "JOY1_XAXIS", "Input", "", "");
+
+  // Pedals
+  config.Set<std::string>("InputAccelerator", "KEY_UP,JOY1_UP", "Input", "", "");
+  config.Set<std::string>("InputBrake", "KEY_DOWN,JOY1_DOWN", "Input", "", "");
+
+  // Up/down shifter manual transmission (all racers)
+  config.Set<std::string>("InputGearShiftUp", "KEY_Y", "Input", "", "");
+  config.Set<std::string>("InputGearShiftDown", "KEY_H", "Input", "", "");
+
+  // 4-Speed manual transmission (Daytona 2, Sega Rally 2, Scud Race)
+  config.Set<std::string>("InputGearShift1", "KEY_Q,JOY1_BUTTON5", "Input", "", "");
+  config.Set<std::string>("InputGearShift2", "KEY_W,JOY1_BUTTON6", "Input", "", "");
+  config.Set<std::string>("InputGearShift3", "KEY_E,JOY1_BUTTON7", "Input", "", "");
+  config.Set<std::string>("InputGearShift4", "KEY_R,JOY1_BUTTON8", "Input", "", "");
+  config.Set<std::string>("InputGearShiftN", "KEY_T", "Input", "", "");
+
+  // VR4 view change buttons (Daytona 2, Le Mans 24, Scud Race)
+  config.Set<std::string>("InputVR1", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputVR2", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputVR3", "KEY_D,JOY1_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputVR4", "KEY_F,JOY1_BUTTON4", "Input", "", "");
+
+  // Single view change button (Dirt Devils, ECA, Harley-Davidson, Sega Rally 2)
+  config.Set<std::string>("InputViewChange", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+
+  // Handbrake (Sega Rally 2)
+  config.Set<std::string>("InputHandBrake", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+
+  // Harley-Davidson controls
+  config.Set<std::string>("InputRearBrake", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputMusicSelect", "KEY_D,JOY1_BUTTON3", "Input", "", "");
+
+  // Virtual On macros
+  config.Set<std::string>("InputTwinJoyTurnLeft", "KEY_Q,JOY1_RXAXIS_NEG", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyTurnRight", "KEY_W,JOY1_RXAXIS_POS", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyForward", "KEY_UP,JOY1_YAXIS_NEG", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyReverse", "KEY_DOWN,JOY1_YAXIS_POS", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyStrafeLeft", "KEY_LEFT,JOY1_XAXIS_NEG", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyStrafeRight", "KEY_RIGHT,JOY1_XAXIS_POS", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyJump", "KEY_E,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyCrouch", "KEY_R,JOY1_BUTTON2", "Input", "", "");
+
+  // Virtual On individual joystick mapping
+  config.Set<std::string>("InputTwinJoyLeft1", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyLeft2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyRight1", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyRight2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyUp1", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyUp2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyDown1", "NONE", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyDown2", "NONE", "Input", "", "");
+
+  // Virtual On buttons
+  config.Set<std::string>("InputTwinJoyShot1", "KEY_A,JOY1_BUTTON5", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyShot2", "KEY_S,JOY1_BUTTON6", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyTurbo1", "KEY_Z,JOY1_BUTTON7", "Input", "", "");
+  config.Set<std::string>("InputTwinJoyTurbo2", "KEY_X,JOY1_BUTTON8", "Input", "", "");
+
+  // Analog joystick (Star Wars Trilogy)
+  config.Set<std::string>("InputAnalogJoyLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyUp", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyDown", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyX", "JOY_XAXIS,MOUSE_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyY", "JOY_YAXIS,MOUSE_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyTrigger", "KEY_A,JOY_BUTTON1,MOUSE_LEFT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyEvent", "KEY_S,JOY_BUTTON2,MOUSE_RIGHT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyTrigger2", "KEY_D,JOY_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputAnalogJoyEvent2", "NONE", "Input", "", "");
+
+  // Light guns (Lost World)
+  config.Set<std::string>("InputGunLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputGunRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputGunUp", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputGunDown", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputGunX", "MOUSE_XAXIS,JOY1_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputGunY", "MOUSE_YAXIS,JOY1_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputTrigger", "KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputOffscreen", "KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputAutoTrigger", "0", "Input", "", "");
+  config.Set<std::string>("InputGunLeft2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputGunRight2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputGunUp2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputGunDown2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputGunX2", "JOY2_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputGunY2", "JOY2_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputTrigger2", "JOY2_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputOffscreen2", "JOY2_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputAutoTrigger2", "0", "Input", "", "");
+
+  // Analog guns (Ocean Hunter, LA Machineguns)
+  config.Set<std::string>("InputAnalogGunLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunUp", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunDown", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunX", "MOUSE_XAXIS,JOY1_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunY", "MOUSE_YAXIS,JOY1_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputAnalogTriggerLeft", "KEY_A,JOY1_BUTTON1,MOUSE_LEFT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputAnalogTriggerRight", "KEY_S,JOY1_BUTTON2,MOUSE_RIGHT_BUTTON", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunLeft2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunRight2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunUp2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunDown2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunX2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogGunY2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogTriggerLeft2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputAnalogTriggerRight2", "NONE", "Input", "", "");
+
+  // Ski Champ controls
+  config.Set<std::string>("InputSkiLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputSkiRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputSkiUp", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputSkiDown", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputSkiX", "JOY1_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputSkiY", "JOY1_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputSkiPollLeft", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputSkiPollRight", "KEY_S,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputSkiSelect1", "KEY_Q,JOY1_BUTTON3", "Input", "", "");
+  config.Set<std::string>("InputSkiSelect2", "KEY_W,JOY1_BUTTON4", "Input", "", "");
+  config.Set<std::string>("InputSkiSelect3", "KEY_E,JOY1_BUTTON5", "Input", "", "");
+
+  // Magical Truck Adventure controls
+  config.Set<std::string>("InputMagicalLeverUp1", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputMagicalLeverDown1", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputMagicalLeverUp2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputMagicalLeverDown2", "NONE", "Input", "", "");
+  config.Set<std::string>("InputMagicalLever1", "JOY1_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputMagicalLever2", "JOY2_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputMagicalPedal1", "KEY_A,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputMagicalPedal2", "KEY_S,JOY2_BUTTON1", "Input", "", "");
+
+  // Sega Bass Fishing / Get Bass controls
+  config.Set<std::string>("InputFishingRodLeft", "KEY_LEFT", "Input", "", "");
+  config.Set<std::string>("InputFishingRodRight", "KEY_RIGHT", "Input", "", "");
+  config.Set<std::string>("InputFishingRodUp", "KEY_UP", "Input", "", "");
+  config.Set<std::string>("InputFishingRodDown", "KEY_DOWN", "Input", "", "");
+  config.Set<std::string>("InputFishingStickLeft", "KEY_A", "Input", "", "");
+  config.Set<std::string>("InputFishingStickRight", "KEY_D", "Input", "", "");
+  config.Set<std::string>("InputFishingStickUp", "KEY_W", "Input", "", "");
+  config.Set<std::string>("InputFishingStickDown", "KEY_S", "Input", "", "");
+  config.Set<std::string>("InputFishingRodX", "JOY1_XAXIS", "Input", "", "");
+  config.Set<std::string>("InputFishingRodY", "JOY1_YAXIS", "Input", "", "");
+  config.Set<std::string>("InputFishingStickX", "JOY1_RXAXIS", "Input", "", "");
+  config.Set<std::string>("InputFishingStickY", "JOY1_RYAXIS", "Input", "", "");
+  config.Set<std::string>("InputFishingReel", "KEY_SPACE,JOY1_ZAXIS_POS", "Input", "", "");
+  config.Set<std::string>("InputFishingCast", "KEY_Z,JOY1_BUTTON1", "Input", "", "");
+  config.Set<std::string>("InputFishingSelect", "KEY_X,JOY1_BUTTON2", "Input", "", "");
+  config.Set<std::string>("InputFishingTension", "KEY_T,JOY1_ZAXIS_NEG", "Input", "", "");
+
+
+
   return config;
 }
 
 static void Title(void)
 {
-  puts("Supermodel: A Sega Model 3 Arcade Emulator (Version " SUPERMODEL_VERSION ")");
-  puts("Copyright 2003-2022 by The Supermodel Team");
+  printf("Supermodel: A Sega Model Series Arcade Emulator (Version %s)\n", SupermodelVersion().c_str());
+  puts("Copyright 2003-2026 by The Supermodel Team");
 }
 
 static void Help(void)
 {
   Util::Config::Node defaultConfig = DefaultConfig();
   puts("Usage: Supermodel <romset> [options]");
-  puts("ROM set must be a valid ZIP file containing a single game or merged set.");
+  puts("ROM set must be a valid ZIP file containing a single game.");
   puts("");
   puts("General Options:");
   puts("  -?, -h, -help, --help   Print this help text");
+  puts("  -version, --version     Print the version and quit");
   puts("  -print-games            List supported games and quit");
-  printf("  -game-xml-file=<file>   ROM set definition file [Default: %s]\n", s_gameXMLFilePath);
-  puts("  -log-output=<outputs>   Log output destination(s) [Default: Supermodel.log]");
+  printf("  -game-xml-file=<file>   ROM set definition file [Default: %s]\n", s_gameXMLFilePath.c_str());
+  printf("  -log-output=<outputs>   Log output destination(s) [Default: %s]\n", s_logFilePath.c_str());
   puts("  -log-level=<level>      Logging threshold [Default: info]");
-  puts("  -game=<name>            Specific game to start in multi-romset");
   puts("");
   puts("Core Options:");
-  printf("  -ppc-frequency=<freq>   PowerPC frequency in MHz [Default: %d]\n", defaultConfig["PowerPCFrequency"].ValueAs<unsigned>());
+  puts("  -ppc-frequency=<mhz>    PowerPC frequency (default varies by stepping)");
   puts("  -no-threads             Disable multi-threading entirely");
   puts("  -gpu-multi-threaded     Run graphics rendering in separate thread [Default]");
   puts("  -no-gpu-thread          Run graphics rendering in main thread");
+  puts("  -idle-skip              Skip PowerPC idle loops [Default]");
+  puts("  -no-idle-skip           Execute PowerPC idle loops in full");
+  puts("  -high-level-geometrizer  Model 1/2 only: simulate the geometrizer (fast)");
+  puts("                          [Default]");
+  puts("  -no-high-level-geometrizer  Model 1/2 only: run the geometrizer DSP programs");
+  puts("                          (more accurate, slower; Model 2: 2B games only)");
   puts("  -load-state=<file>      Load save state after starting");
   puts("");
   puts("Video Options:");
   puts("  -res=<x>,<y>            Resolution [Default: 496,384]");
+  puts("  -ss=<n>                 Supersampling (range 1-8)");
+  puts("  -window-pos=<x>,<y>     Window position [Default: centered]");
   puts("  -window                 Windowed mode [Default]");
+  puts("  -borderless             Windowed mode with no border");
   puts("  -fullscreen             Full screen mode");
   puts("  -wide-screen            Expand 3D field of view to screen width");
   puts("  -wide-bg                When wide-screen mode is enabled, also expand the 2D");
   puts("                          background layer to screen width");
   puts("  -stretch                Fit viewport to resolution, ignoring aspect ratio");
+  puts("  -upscalemode=<n>        2D layer upscaling filter mode (range 0-3)");
+  puts("  -crtcolors=<n>          CRT color emulation (range 0-5)");
   puts("  -no-throttle            Disable frame rate lock");
   puts("  -vsync                  Lock to vertical refresh rate [Default]");
   puts("  -no-vsync               Do not lock to vertical refresh rate");
   puts("  -true-hz                Use true Model 3 refresh rate of 57.524 Hz");
   puts("  -show-fps               Display frame rate in window title bar");
-  puts("  -border=<n>             Alias of -sinden=<n>");
-  puts("  -sinden=<n>             Sinden border configuration for gun games:");
-  puts("                          0=none [Default], 1=standard, 2=wide");
   puts("  -crosshairs=<n>         Crosshairs configuration for gun games:");
   puts("                          0=none [Default], 1=P1 only, 2=P2 only, 3=P1 & P2");
-  puts("  -nomousecursor          Disable desktop mouse cursor in SDL Windowed mode");
-  puts("  -new3d                  New 3D engine by Ian Curtis");
-  puts("  -quad-rendering         Enable proper quad rendering");
-  puts("  -legacy3d               Legacy 3D engine (faster but less accurate) [Default]");
+  puts("  -crosshair-style=<s>    Crosshair style: vector or bmp. [Default: vector]");
+#ifndef SUPERMODEL_OSX
+  puts("  -new3d                  New 3D engine by Ian Curtis [Default]");
+#endif
+  puts("  -quad-rendering         Enable proper quad rendering [Default]");
+  puts("  -no-quad-rendering      Render quads as triangles");
+#ifndef SUPERMODEL_OSX
+  puts("  -legacy3d               Legacy 3D engine (faster but less accurate)");
   puts("  -multi-texture          Use 8 texture maps for decoding (legacy engine)");
   puts("  -no-multi-texture       Decode to single texture (legacy engine) [Default]");
-  puts("  -vert-shader=<file>     Load Real3D vertex shader for 3D rendering");
-  puts("  -frag-shader=<file>     Load Real3D fragment shader for 3D rendering");
-  puts("  -vert-shader-fog=<file> Load Real3D scroll fog vertex shader (new engine)");
-  puts("  -frag-shader-fog=<file> Load Real3D scroll fog fragment shader (new engine)");
-  puts("  -vert-shader-2d=<file>  Load tile map vertex shader");
-  puts("  -frag-shader-2d=<file>  Load tile map fragment shader");
+#endif
+  puts("  -no-white-flash         Disables white flash when games disable 3D rendering");
+#ifndef SUPERMODEL_OSX
+  puts("  -vert-shader=<file>     Load Real3D vertex shader for 3D rendering (legacy");
+  puts("                          engine)");
+  puts("  -frag-shader=<file>     Load Real3D fragment shader for 3D rendering (legacy");
+  puts("                          engine)");
+#endif
   puts("  -print-gl-info          Print OpenGL driver information and quit");
   puts("");
   puts("Audio Options:");
@@ -1627,41 +2001,47 @@ static void Help(void)
   puts("  -flip-stereo            Swap left and right audio channels");
   puts("  -no-sound               Disable sound board emulation (sound effects)");
   puts("  -no-dsb                 Disable Digital Sound Board (MPEG music)");
-  puts("  -new-scsp               New SCSP engine based on MAME [Default]");
-  puts("  -legacy-scsp            Legacy SCSP engine by ElSemi");
   puts("");
-#ifdef NET_BOARD
   puts("Net Options:");
   puts("  -no-net                 Disable net board [Default]");
   puts("  -net                    Enable net board");
   puts("  -simulate-netboard      Simulate the net board [Default]");
   puts("  -emulate-netboard       Emulate the net board (requires -no-threads)");
+  printf("  -port=<n>, -port-in=<n> TCP port of this machine (net board and PRO-1000)\n"
+         "                          [Default: %u]\n", defaultConfig["PortIn"].ValueAs<unsigned>());
+  printf("  -port-out=<n>           TCP port of the next machine [Default: %u]\n", defaultConfig["PortOut"].ValueAs<unsigned>());
+  printf("  -address-out=<addr>     Address of the next machine [Default: %s]\n", defaultConfig["AddressOut"].ValueAs<std::string>().c_str());
   puts("");
-#endif
   puts("Input Options:");
   puts("  -force-feedback         Enable force feedback (DirectInput, XInput)");
   puts("  -config-inputs          Configure keyboards, mice, and game controllers");
 #ifdef SUPERMODEL_WIN32
   printf("  -input-system=<s>       Input system [Default: %s]\n", defaultConfig["InputSystem"].ValueAs<std::string>().c_str());
-  printf("  -outputs=<s>            Outputs [Default: %s]\n", defaultConfig["Outputs"].ValueAs<std::string>().c_str());
 #endif
-  puts("  -abs-mice-only          Filter non-Absolute Positional Mouse Devices [evdev only]");
   puts("  -print-inputs           Prints current input configuration");
   puts("");
+  puts("Output Options:");
+  printf("  -outputs=<s>            Outputs [Default: %s]\n", defaultConfig["Outputs"].ValueAs<std::string>().c_str());
+  puts("");
   puts("Debug Options:");
+  puts("  -dump-memory            Write memory regions to files on exit");
   puts("  -dump-textures          Write textures to bitmap image files on exit");
 #ifdef SUPERMODEL_DEBUGGER
   puts("  -disable-debugger       Completely disable debugger functionality");
   puts("  -enter-debugger         Enter debugger at start of emulation");
-  puts("");
 #endif // SUPERMODEL_DEBUGGER
+#ifdef DEBUG
+  puts("  -gfx-state=<file>       Produce graphics analysis for save state (works only");
+  puts("                          with the legacy 3D engine and requires a");
+  puts("                          GraphicsAnalysis directory to exist)");
+#endif
+  puts("");
 }
 
 struct ParsedCommandLine
 {
   Util::Config::Node config = Util::Config::Node("CommandLine");
   std::vector<std::string> rom_files;
-  std::string game_name;
   bool error = false;
   bool print_help = false;
   bool print_games = false;
@@ -1678,7 +2058,7 @@ struct ParsedCommandLine
   {
     // Logging is special: it is only parsed from the command line and
     // therefore, defaults are needed early
-    config.Set("LogOutput", "Supermodel.log");
+    config.Set("LogOutput", s_logFilePath.c_str());
     config.Set("LogLevel", "info");
   }
 };
@@ -1686,46 +2066,51 @@ struct ParsedCommandLine
 static ParsedCommandLine ParseCommandLine(int argc, char **argv)
 {
   ParsedCommandLine cmd_line;
-  const std::map<std::string, std::string> valued_options
+  static const std::map<std::string, std::string> valued_options
   { // -option=value
     { "-game-xml-file",         "GameXMLFile"             },
     { "-load-state",            "InitStateFile"           },
     { "-ppc-frequency",         "PowerPCFrequency"        },
     { "-crosshairs",            "Crosshairs"              },
-    { "-border",                "Border"                  },
-    { "-sinden",                "Border"                  },
+    { "-crosshair-style",       "CrosshairStyle"          },
     { "-vert-shader",           "VertexShader"            },
     { "-frag-shader",           "FragmentShader"          },
-    { "-vert-shader-fog",       "VertexShaderFog"         },
-    { "-frag-shader-fog",       "FragmentShaderFog"       },
-    { "-vert-shader-2d",        "VertexShader2D"          },
-    { "-frag-shader-2d",        "FragmentShader2D"        },
     { "-sound-volume",          "SoundVolume"             },
     { "-music-volume",          "MusicVolume"             },
     { "-balance",               "Balance"                 },
     { "-channels", 	            "NbSoundChannels"         },
-    { "-soundfreq",             "SoundFreq"               },
     { "-input-system",          "InputSystem"             },
     { "-outputs",               "Outputs"                 },
+    { "-port",                  "PortIn"                  },
+    { "-port-in",               "PortIn"                  },
+    { "-port-out",              "PortOut"                 },
+    { "-address-out",           "AddressOut"              },
     { "-log-output",            "LogOutput"               },
     { "-log-level",             "LogLevel"                }
   };
-  const std::map<std::string, std::pair<std::string, bool>> bool_options
+  static const std::map<std::string, std::pair<std::string, bool>> bool_options
   { // -option
     { "-threads",             { "MultiThreaded",    true } },
     { "-no-threads",          { "MultiThreaded",    false } },
     { "-gpu-multi-threaded",  { "GPUMultiThreaded", true } },
     { "-no-gpu-thread",       { "GPUMultiThreaded", false } },
+    { "-idle-skip",           { "IdleSkip",         true } },
+    { "-no-idle-skip",        { "IdleSkip",         false } },
+    { "-high-level-geometrizer",    { "HighLevelGeometrizer", true } },
+    { "-no-high-level-geometrizer", { "HighLevelGeometrizer", false } },
     { "-window",              { "FullScreen",       false } },
     { "-fullscreen",          { "FullScreen",       true } },
+    { "-borderless",          { "BorderlessWindow", true } },
     { "-no-wide-screen",      { "WideScreen",       false } },
     { "-wide-screen",         { "WideScreen",       true } },
     { "-stretch",             { "Stretch",          true } },
     { "-no-stretch",          { "Stretch",          false } },
     { "-wide-bg",             { "WideBackground",   true } },
     { "-no-wide-bg",          { "WideBackground",   false } },
+#ifndef SUPERMODEL_OSX
     { "-no-multi-texture",    { "MultiTexture",     false } },
     { "-multi-texture",       { "MultiTexture",     true } },
+#endif
     { "-throttle",            { "Throttle",         true } },
     { "-no-throttle",         { "Throttle",         false } },
     { "-vsync",               { "VSync",            true } },
@@ -1734,25 +2119,25 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-no-fps",              { "ShowFrameRate",    false } },
     { "-new3d",               { "New3DEngine",      true } },
     { "-quad-rendering",      { "QuadRendering",    true } },
+    { "-no-quad-rendering",   { "QuadRendering",    false } },
+#ifndef SUPERMODEL_OSX
     { "-legacy3d",            { "New3DEngine",      false } },
+#endif
     { "-no-flip-stereo",      { "FlipStereo",       false } },
     { "-flip-stereo",         { "FlipStereo",       true } },
     { "-sound",               { "EmulateSound",     true } },
     { "-no-sound",            { "EmulateSound",     false } },
     { "-dsb",                 { "EmulateDSB",       true } },
     { "-no-dsb",              { "EmulateDSB",       false } },
-    { "-legacy-scsp",         { "LegacySoundDSP",   true } },
-    { "-new-scsp",            { "LegacySoundDSP",   false } },
-    { "-nomousecursor",       { "MouseCursor",      false } },
-#ifdef NET_BOARD
-    { "-net",                 { "Network",       true } },
-    { "-no-net",              { "Network",       false } },
-    { "-simulate-netboard",   { "SimulateNet",   true } },
-    { "-emulate-netboard",    { "SimulateNet",   false } },
-#endif
+    { "-no-white-flash",      { "NoWhiteFlash",     true } },
+    { "-white-flash",         { "NoWhiteFlash",     false } },
+    { "-net",                 { "Network",          true } },
+    { "-no-net",              { "Network",          false } },
+    { "-simulate-netboard",   { "SimulateNet",      true } },
+    { "-emulate-netboard",    { "SimulateNet",      false } },
     { "-no-force-feedback",   { "ForceFeedback",    false } },
     { "-force-feedback",      { "ForceFeedback",    true } },
-    { "-abs-mice-only",       { "ABSMiceOnly",      true }},
+    { "-dump-memory",         { "DumpMemory",       true } },
     { "-dump-textures",       { "DumpTextures",     true } },
   };
   for (int i = 1; i < argc; i++)
@@ -1766,7 +2151,7 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
       {
         std::string option(arg.begin(), arg.begin() + idx_equals);
         std::string value(arg.begin() + idx_equals + 1, arg.end());
-        if (value.length() == 0)
+        if (value.empty())
         {
           ErrorLog("Argument to '%s' cannot be blank.", option.c_str());
           cmd_line.error = true;
@@ -1826,6 +2211,98 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
           }
         }
       }
+      else if (arg == "-window-pos" || arg.find("-window-pos=") == 0)
+      {
+          std::vector<std::string> parts = Util::Format(arg).Split('=');
+          if (parts.size() != 2)
+          {
+              ErrorLog("'-window-pos' requires both an X and Y position (e.g., '-window-pos=10,0').");
+              cmd_line.error = true;
+          }
+          else
+          {
+              int xpos, ypos;
+              if (2 == sscanf(&argv[i][11], "=%d,%d", &xpos, &ypos))
+              {
+                  cmd_line.config.Set("WindowXPosition", xpos);
+                  cmd_line.config.Set("WindowYPosition", ypos);
+              }
+              else
+              {
+                  ErrorLog("'-window-pos' requires both an X and Y position (e.g., '-window-pos=10,0').");
+                  cmd_line.error = true;
+              }
+          }
+      }
+      else if (arg == "-ss" || arg.find("-ss=") == 0) {
+
+          std::vector<std::string> parts = Util::Format(arg).Split('=');
+
+          if (parts.size() != 2)
+          {
+              ErrorLog("'-ss' requires an integer argument (e.g., '-ss=2').");
+              cmd_line.error = true;
+          }
+          else {
+
+              try {
+                  int val = std::stoi(parts[1]);
+                  val = std::clamp(val, 1, 8);
+
+                  cmd_line.config.Set("Supersampling", val);
+              }
+              catch (...) {
+                  ErrorLog("'-ss' requires an integer argument (e.g., '-ss=2').");
+                  cmd_line.error = true;
+              }
+          }
+      }
+      else if (arg == "-crtcolors" || arg.find("-crtcolors=") == 0) {
+
+          std::vector<std::string> parts = Util::Format(arg).Split('=');
+
+          if (parts.size() != 2)
+          {
+              ErrorLog("'-crtcolors' requires an integer argument (e.g., '-crtcolors=1').");
+              cmd_line.error = true;
+          }
+          else {
+
+              try {
+                  int val = std::stoi(parts[1]);
+                  val = std::clamp(val, 0, 5);
+
+                  cmd_line.config.Set("CRTcolors", val);
+              }
+              catch (...) {
+                  ErrorLog("'-crtcolors' requires an integer argument (e.g., '-crtcolors=1').");
+                  cmd_line.error = true;
+              }
+          }
+      }
+      else if (arg == "-upscalemode" || arg.find("-upscalemode=") == 0) {
+
+          std::vector<std::string> parts = Util::Format(arg).Split('=');
+
+          if (parts.size() != 2)
+          {
+              ErrorLog("'-upscalemode' requires an integer argument (e.g., '-upscalemode=1').");
+              cmd_line.error = true;
+          }
+          else {
+
+              try {
+                  int val = std::stoi(parts[1]);
+                  val = std::clamp(val, 0, 3);
+
+                  cmd_line.config.Set("UpscaleMode", val);
+              }
+              catch (...) {
+                  ErrorLog("'-upscalemode' requires an integer argument (e.g., '-upscalemode=1').");
+                  cmd_line.error = true;
+              }
+          }
+      }
       else if (arg == "-true-hz")
         cmd_line.config.Set("RefreshRate", 57.524f);
       else if (arg == "-print-gl-info")
@@ -1834,8 +2311,6 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
         cmd_line.config_inputs = true;
       else if (arg == "-print-inputs")
         cmd_line.print_inputs = true;
-      else if (arg == "-lightguns-only")
-        cmd_line.config.Set("ABSMiceOnly", true);
 #ifdef SUPERMODEL_DEBUGGER
       else if (arg == "-disable-debugger")
         cmd_line.disable_debugger = true;
@@ -1855,17 +2330,6 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
           cmd_line.gfx_state = parts[1];
       }
 #endif
-      else if (arg == "-game" || arg.find("-game=") == 0)
-      {
-        std::vector<std::string> parts = Util::Format(arg).Split('=');
-        if (parts.size() != 2)
-        {
-          ErrorLog("'-game' requires a name.");
-          cmd_line.error = true;
-        }
-        else
-          cmd_line.game_name = parts[1];
-      }
       else
       {
         ErrorLog("Ignoring unrecognized option: %s", argv[i]);
@@ -1883,14 +2347,27 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
  *
  * Program entry point.
  */
-
 int main(int argc, char **argv)
 {
+  // Handled before anything else so that only the version is printed and nothing
+  // is written to disk. The packaging scripts rely on this output.
+  for (int i = 1; i < argc; i++)
+  {
+    if (!strcmp(argv[i], "-version") || !strcmp(argv[i], "--version"))
+    {
+      printf("Supermodel %s\n", SupermodelVersion().c_str());
+      return 0;
+    }
+  }
+
   Title();
+  WriteDefaultConfigurationFileIfNotPresent();
+
+  bool loadGUI = false;
   if (argc <= 1)
   {
-    Help();
-    return 0;
+    //Help();
+    loadGUI = true;
   }
 
   // Before command line is parsed, console logging only
@@ -1903,6 +2380,21 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  if (loadGUI) {
+      // Load up what settings we have so far. The complete file is passed to the GUI,
+      // which edits only the global section and preserves any game-specific sections.
+      // Editing the game-specific sections themselves is not supported atm but we can
+      // look at this later.
+      Util::Config::Node fileConfig("Global");
+      Util::Config::FromINIFile(&fileConfig, s_configFilePath);
+
+      cmd_line.rom_files = RunGUI(s_configFilePath, fileConfig);
+
+      if (cmd_line.rom_files.empty()) {
+          return 0;
+      }
+  }
+
   // Create logger as specified by command line
   auto logger = CreateLogger(cmd_line.config);
   if (!logger)
@@ -1911,7 +2403,7 @@ int main(int argc, char **argv)
     return 1;
   }
   SetLogger(logger);
-  InfoLog("Supermodel Version " SUPERMODEL_VERSION);
+  InfoLog("Supermodel Version %s", SupermodelVersion().c_str());
   InfoLog("Started as:");
   for (int i = 0; i < argc; i++)
     InfoLog("  argv[%d] = %s", i, argv[i]);
@@ -1924,10 +2416,14 @@ int main(int argc, char **argv)
   }
   if (cmd_line.print_gl_info)
   {
+    // Use command line options so we can select the 3D engine for which to print GL info
+    Util::Config::MergeINISections(&s_runtime_config, DefaultConfig(), cmd_line.config);
+
     // We must exit after this because CreateGLScreen() is used
     PrintGLInfo(true, false, false);
     return 0;
   }
+
 #ifdef DEBUG
   s_gfxStatePath.assign(cmd_line.gfx_state);
 #endif
@@ -1942,6 +2438,7 @@ int main(int argc, char **argv)
   // Load game and resolve run-time config
   Game game;
   ROMSet rom_set;
+
   Util::Config::Node fileConfig("Global");
   {
     Util::Config::Node fileConfigWithDefaults("Global");
@@ -1959,7 +2456,7 @@ int main(int argc, char **argv)
         PrintGameList(xml_file, loader.GetGames());
         return 0;
       }
-      if (loader.Load(&game, &rom_set, *cmd_line.rom_files.begin(), cmd_line.game_name))
+      if (loader.Load(&game, &rom_set, *cmd_line.rom_files.begin()))
         return 1;
       Util::Config::MergeINISections(&config4, config3, fileConfig[game.name]);   // apply game-specific config
     }
@@ -1976,45 +2473,55 @@ int main(int argc, char **argv)
     return 1;
   }
 
+  // Flag as DPI-aware, otherwise the window content might be scaled by some graphics drivers
+  SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
+
   // Begin initializing various subsystems...
   int exitCode = 0;
-  IEmulator *Model3 = nullptr;
-  CInputSystem *InputSystem = nullptr;
+  IEmulator *Emu = nullptr;
+  std::shared_ptr<CNetServer> netServer;
+  std::shared_ptr<CInputSystem> InputSystem;
   CInputs *Inputs = nullptr;
   COutputs *Outputs = nullptr;
+  std::unique_ptr<CConsoleInput> consoleInput;  // must outlive emulator and debugger
 #ifdef SUPERMODEL_DEBUGGER
   std::shared_ptr<Debugger::CSupermodelDebugger> Debugger;
 #endif // SUPERMODEL_DEBUGGER
   std::string selectedInputSystem = s_runtime_config["InputSystem"].ValueAs<std::string>();
 
+  aaValue = s_runtime_config["Supersampling"].ValueAs<int>();
+  CRTcolors = (CRTcolor)s_runtime_config["CRTcolors"].ValueAs<int>();
+
   // Create a window
   xRes = 496;
   yRes = 384;
-  if (Result::OKAY != CreateGLScreen("Supermodel", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
+  if (Result::OKAY != CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), "Supermodel", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
   {
     exitCode = 1;
     goto Exit;
   }
 
-  // Create Model 3 emulator
-#ifdef DEBUG
-  Model3 = s_gfxStatePath.empty() ? static_cast<IEmulator *>(new CModel3(s_runtime_config)) : static_cast<IEmulator *>(new CModel3GraphicsState(s_runtime_config, s_gfxStatePath));
-#else
-  Model3 = new CModel3(s_runtime_config);
-#endif
+  // Create Crosshair
+  s_crosshair = new CCrosshair(s_runtime_config);
+  if (s_crosshair->Init() != Result::OKAY)
+  {
+      ErrorLog("Unable to load bitmap crosshair texture\n");
+      exitCode = 1;
+      goto Exit;
+  }
 
   // Create input system
   if (selectedInputSystem == "sdl")
-    InputSystem = new CSDLInputSystem(s_runtime_config, false);
+    InputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(s_runtime_config, false));
   else if (selectedInputSystem == "sdlgamepad")
-    InputSystem = new CSDLInputSystem(s_runtime_config, true);
+    InputSystem = std::shared_ptr<CInputSystem>(new CSDLInputSystem(s_runtime_config, true));
 #ifdef SUPERMODEL_WIN32
   else if (selectedInputSystem == "dinput")
-    InputSystem = new CDirectInputSystem(s_runtime_config, s_window, false, false);
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, false, false));
   else if (selectedInputSystem == "xinput")
-    InputSystem = new CDirectInputSystem(s_runtime_config, s_window, false, true);
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, false, true));
   else if (selectedInputSystem == "rawinput")
-    InputSystem = new CDirectInputSystem(s_runtime_config, s_window, true, false);
+    InputSystem = std::shared_ptr<CInputSystem>(new CDirectInputSystem(s_runtime_config, s_window, true, false));
 #endif // SUPERMODEL_WIN32
   else
   {
@@ -2051,13 +2558,23 @@ int main(int argc, char **argv)
     goto Exit;
 
   // Create outputs
-#ifdef SUPERMODEL_WIN32
   {
     std::string outputs = s_runtime_config["Outputs"].ValueAs<std::string>();
     if (outputs == "none")
       Outputs = NULL;
-    else if (outputs == "win")
+    else if (outputs == "net")
+    {
+        CNetOutputs* netOutputs = new CNetOutputs();
+        if (s_runtime_config["OutputsWithLF"].ValueAs<bool>())
+            netOutputs->SetFrameEnding(std::string("\r\n"));
+        netOutputs->SetTcpPort(s_runtime_config["OutputsTCPPort"].ValueAs<unsigned int>());
+        netOutputs->SetUdpBroadcastPort(s_runtime_config["OutputsUDPBroadcastPort"].ValueAs<unsigned int>());
+        Outputs = (COutputs*)netOutputs;
+#ifdef SUPERMODEL_WIN32
+    } else if (outputs == "win") {
       Outputs = new CWinOutputs();
+#endif // SUPERMODEL_WIN32
+    }
     else
     {
       ErrorLog("Unknown outputs: %s\n", outputs.c_str());
@@ -2065,7 +2582,6 @@ int main(int argc, char **argv)
       goto Exit;
     }
   }
-#endif // SUPERMODEL_WIN32
 
   // Initialize outputs
   if (Outputs != NULL && !Outputs->Initialize())
@@ -2075,30 +2591,64 @@ int main(int argc, char **argv)
     goto Exit;
   }
 
+  // Network server: for the net board, and for the programs that connect to
+  // the PRO-1000. If it cannot listen, emulation continues.
+  if (game.platform == Game::PLATFORM_PRO1000 || (game.netboard_present && s_runtime_config["Network"].ValueAs<bool>()))
+  {
+    netServer = std::make_shared<CNetServer>(s_runtime_config["PortIn"].ValueAs<unsigned>(), "Supermodel " + SupermodelVersion() + " (" + game.name + ")");
+    netServer->Start();
+  }
+
+  // Console input is created only when something reads it: the emulated
+  // machine's serial console (PRO-1000) and/or the debugger
+  {
+    bool needConsoleInput = game.platform == Game::PLATFORM_PRO1000;
+#ifdef SUPERMODEL_DEBUGGER
+    needConsoleInput |= !cmd_line.disable_debugger;
+#endif // SUPERMODEL_DEBUGGER
+    if (needConsoleInput)
+      consoleInput = std::make_unique<CConsoleInput>();
+  }
+
+  // Create emulator for the appropriate platform
+#ifdef DEBUG
+  if (!s_gfxStatePath.empty())
+    Emu = new CModel3GraphicsState(s_runtime_config, s_gfxStatePath);
+  else
+#endif
+  if (game.platform == Game::PLATFORM_PRO1000)
+    Emu = new CPro1000(s_runtime_config, consoleInput ? consoleInput->CreateInput() : nullptr, netServer);
+  else if (game.platform == Game::PLATFORM_MODEL1)
+    Emu = new CModel1(s_runtime_config, Inputs, Outputs);
+  else if (game.platform == Game::PLATFORM_MODEL2)
+    Emu = new CModel2(s_runtime_config, Inputs, Outputs, netServer);
+  else
+    Emu = new CModel3(s_runtime_config, Inputs, Outputs, netServer);
+
 #ifdef SUPERMODEL_DEBUGGER
   // Create Supermodel debugger unless debugging is disabled
   if (!cmd_line.disable_debugger)
   {
-    Debugger = std::make_shared<Debugger::CSupermodelDebugger>(dynamic_cast<CModel3 *>(Model3), Inputs, logger);
+    Debugger = std::make_shared<Debugger::CSupermodelDebugger>(Emu, Inputs, logger);
+    if (consoleInput)
+      Debugger->AttachConsoleInput(consoleInput->CreateInput());
     // If -enter-debugger option was set force debugger to break straightaway
     if (cmd_line.enter_debugger)
       Debugger->ForceBreak(true);
   }
   // Fire up Supermodel with debugger
-  exitCode = Supermodel(game, &rom_set, Model3, Inputs, Outputs, Debugger);
+  exitCode = Supermodel(game, &rom_set, Emu, Inputs, Outputs, Debugger);
 #else
   // Fire up Supermodel
-  exitCode = Supermodel(game, &rom_set, Model3, Inputs, Outputs);
+  exitCode = Supermodel(game, &rom_set, Emu, Inputs, Outputs);
 #endif // SUPERMODEL_DEBUGGER
-  delete Model3;
+  delete Emu;
 
 Exit:
-  if (Inputs != NULL)
-    delete Inputs;
-  if (InputSystem != NULL)
-    delete InputSystem;
-  if (Outputs != NULL)
-    delete Outputs;
+  netServer.reset();
+  delete Inputs;
+  delete Outputs;
+  delete s_crosshair;
   DestroyGLScreen();
   SDL_Quit();
 
@@ -2109,3 +2659,4 @@ Exit:
 
   return exitCode;
 }
+

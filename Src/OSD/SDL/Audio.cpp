@@ -1,7 +1,7 @@
 /**
  ** Supermodel
  ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
+ ** Copyright 2003-2026 The Supermodel Team
  **
  ** This file is part of Supermodel.
  **
@@ -58,16 +58,17 @@
 #include "Supermodel.h"
 #include "SDLIncludes.h"
 
+#include <atomic>
 #include <cmath>
 #include <algorithm>
 
-  // Model3 audio output is 44.1KHz 4-channel sound and frame rate is 60fps
+// Model3 audio output is 44.1KHz 4-channel sound. The sound board sends one frame at a time: 1/refresh rate of a
+// second, which is 735 samples at 60 Hz and 766-767 at 57.524 Hz (at most 981, for 45 Hz).
 #define SAMPLE_RATE_M3     (44100)
-#define SUPERMODEL_FPS     (60.0f)
-#define MODEL3_FPS         (57.53f)
+#define MODEL3_FPS         (57.524f)    // nominal frame length used for buffer bookkeeping
 
-#define MAX_SND_FREQ       (75)
-#define MIN_SND_FREQ       (45)
+#define MAX_INPUT_SAMPLES  (SAMPLE_RATE_M3 / 45 + 1)                // longest frame the sound board sends
+#define MAX_OUTPUT_SAMPLES (MAX_INPUT_SAMPLES + MAX_INPUT_SAMPLES / 100 + 2) // after rate control (at most +0.5%)
 #define MAX_LATENCY        (100)
 
 #define NUM_CHANNELS_M3 (4)
@@ -81,7 +82,6 @@ int nbHostAudioChannels = NUM_CHANNELS_M3;   // Number of channels on host
 #define BYTES_PER_FRAME_M3   (SAMPLES_PER_FRAME_M3 * BYTES_PER_SAMPLE_M3)
 
 
-static int samples_per_frame_host = SAMPLES_PER_FRAME_M3;
 static int bytes_per_sample_host = BYTES_PER_SAMPLE_M3;
 static int bytes_per_frame_host = BYTES_PER_FRAME_M3;
 
@@ -94,13 +94,15 @@ float balanceFactorFrontRight = 1.0f;
 float balanceFactorRearLeft   = 1.0f;
 float balanceFactorRearRight  = 1.0f;
 
-static bool enabled = true;         // True if sound output is enabled
-static constexpr unsigned latency = 20;       // Audio latency to use (ie size of audio buffer) as percentage of max buffer size
+static std::atomic<bool> enabled = true; // True if sound output is enabled (written by the main thread, read by the audio callback)
+static constexpr unsigned latency = 20;       // Size of audio buffer as percentage of max buffer size (headroom only, see targetLatencyMs)
+static constexpr unsigned targetLatencyMs = 50; // Amount of audio kept queued ahead of playback; this is the output latency
 static constexpr bool underRunLoop = true;    // True if should loop back to beginning of buffer on under-run, otherwise sound is just skipped
 
 static constexpr unsigned playSamples = 512;  // Size (in samples) of callback play buffer
 
 static UINT32 audioBufferSize = 0;  // Size (in bytes) of audio buffer
+static UINT32 targetFillBytes = 0;  // Bytes of audio to keep queued (targetLatencyMs)
 static INT8* audioBuffer = NULL;    // Audio buffer
 
 static UINT32 writePos = 0;         // Current position at which writing into buffer
@@ -115,6 +117,16 @@ static AudioCallbackFPtr callback = NULL; // Pointer to audio callback that is c
 static void* callbackData = NULL;         // Pointer to data to be passed to audio callback when it is called
 
 static const Util::Config::Node* s_config = 0;
+
+// Rate control, used when the sound board runs once per emulated frame (no audio callback). The emulator's frame
+// timer and the sound card's clock are never exactly the same (and VSync can tie frames to a monitor that isn't
+// exactly the chosen refresh rate), so the queue would slowly drain or fill. Each frame is stretched or squeezed by
+// at most 0.5% (about 8 cents, too small to hear) to hold the queue at targetFillBytes.
+static constexpr double maxRateAdjust = 0.005;
+static double rateErrorFiltered = 0.0;  // queue error (fraction of the target), low-pass filtered
+static double rateErrorIntegral = 0.0;  // sum of the filtered error, removes the steady error a clock offset would leave
+static double resamplePhase = -1.0;     // position of the next output sample, in input samples from the start of the next frame (-1 = last sample of the previous frame)
+static float resamplePrev[4] = {};      // last input sample of the previous frame, per channel
 
 
 void SetAudioCallback(AudioCallbackFPtr newCallback, void* newData)
@@ -142,9 +154,9 @@ void SetAudioType(Game::AudioTypes type)
     AudioType = type;
 }
 
-static INT16 AddAndClampINT16(INT32 x, INT32 y)
+static INT16 MixINT16(float x, float y)
 {
-    INT32 sum = x + y;
+    INT32 sum = (INT32)((x + y)*0.5f); //!! dither
     if (sum > INT16_MAX) {
         sum = INT16_MAX;
     }
@@ -154,16 +166,39 @@ static INT16 AddAndClampINT16(INT32 x, INT32 y)
     return (INT16)sum;
 }
 
-static INT16 MixINT16(INT32 x, INT32 y)
+static float MixFloat(float x, float y)
 {
-    INT32 sum = (x + y)>>1;
-    if (sum > INT16_MAX) {
-        sum = INT16_MAX;
+    return (x + y)*0.5f;
+}
+
+static INT16 ClampINT16(float x)
+{
+    INT32 xi = (INT32)x; //!! dither
+    if (xi > INT16_MAX) {
+        xi = INT16_MAX;
     }
-    if (sum < INT16_MIN) {
-        sum = INT16_MIN;
+    if (xi < INT16_MIN) {
+        xi = INT16_MIN;
     }
-    return (INT16)sum;
+    return (INT16)xi;
+}
+
+// Frame-driven mode only, called with the audio lock held after an under-run: restart with exactly the target amount
+// queued (silence) instead of looping back over old audio, which would leave the queue nearly full and take rate
+// control many seconds to bring back down.
+static void RestartQueue()
+{
+    UINT32 end = playPos + targetFillBytes;
+    if (end <= audioBufferSize)
+        memset(audioBuffer + playPos, 0, targetFillBytes);
+    else
+    {
+        memset(audioBuffer + playPos, 0, audioBufferSize - playPos);
+        memset(audioBuffer, 0, end - audioBufferSize);
+    }
+    writeWrapped = end >= audioBufferSize;
+    writePos = writeWrapped ? end - audioBufferSize : end;
+    rateErrorFiltered = 0.0;	// the integral is kept: it holds the clock offset, which hasn't changed
 }
 
 static void PlayCallback(void* data, Uint8* stream, int len)
@@ -177,16 +212,26 @@ static void PlayCallback(void* data, Uint8* stream, int len)
         adjWritePos += audioBufferSize;
 
     // Check if play position overlaps write position (ie buffer under-run)
-	if (playPos + len > adjWritePos)
-	{
+    if (playPos + len > adjWritePos)
+    {
         underRuns++;
 
         //printf("Audio buffer under-run #%u in PlayCallback(%d) [writePos = %u, writeWrapped = %s, playPos = %u, audioBufferSize = %u]\n",
         //	underRuns, len, writePos, (writeWrapped ? "true" : "false"), playPos, audioBufferSize);
 
         // See what action to take on under-run
-		if (underRunLoop)
-		{
+        if (!callback)
+        {
+            // Frame-driven: play silence, then restart with the target amount queued
+            memset(stream, 0, len);
+            playPos += len;
+            if (playPos >= audioBufferSize)
+                playPos -= audioBufferSize;
+            RestartQueue();
+            return;
+        }
+        else if (underRunLoop)
+        {
             // If loop, then move play position back to beginning of data in buffer
             playPos = adjWritePos + bytes_per_frame_host;
 
@@ -197,9 +242,9 @@ static void PlayCallback(void* data, Uint8* stream, int len)
             else
                 // Otherwise, set write wrapped flag as will now appear as if write has wrapped but play position has not
                 writeWrapped = true;
-		}
-		else
-		{
+        }
+        else
+        {
             // Otherwise, just copy silence to audio output stream and exit
             memset(stream, 0, len);
             return;
@@ -212,26 +257,26 @@ static void PlayCallback(void* data, Uint8* stream, int len)
     UINT32 len2;
 
     // Check if play region extends past end of buffer
-	if (playPos + len > audioBufferSize)
-	{
+    if (playPos + len > audioBufferSize)
+    {
         // If so, split play region into two
         src1 = audioBuffer + playPos;
         src2 = audioBuffer;
         len1 = audioBufferSize - playPos;
         len2 = len - len1;
-	}
-	else
-	{
+    }
+    else
+    {
         // Otherwise, just copy whole region
         src1 = audioBuffer + playPos;
-        src2 = 0;
+        src2 = nullptr;
         len1 = len;
         len2 = 0;
     }
 
     // Check if audio is enabled
-	if (enabled)
-	{
+    if (enabled)
+    {
         // If so, copy play region into audio output stream
         memcpy(stream, src1, len1);
 
@@ -239,8 +284,8 @@ static void PlayCallback(void* data, Uint8* stream, int len)
         if (!underRunLoop)
             memset(src1, 0, len1);
 
-		if (len2)
-		{
+        if (len2)
+        {
             // If region was split into two, copy second half into audio output stream as well
             memcpy(stream + len1, src2, len2);
 
@@ -248,19 +293,19 @@ static void PlayCallback(void* data, Uint8* stream, int len)
             if (!underRunLoop)
                 memset(src2, 0, len2);
         }
-	}
-	else
+    }
+    else
         // Otherwise, just copy silence to audio output stream
         memset(stream, 0, len);
 
     // Move play position forward for next time
     playPos += len;
 
-    bool bufferFull = adjWritePos + 2 * bytes_per_frame_host > playPos + audioBufferSize;
+    bool bufferFull = adjWritePos >= playPos + targetFillBytes;
 
     // Check if play position has moved past end of buffer
-	if (playPos >= audioBufferSize)
-	{
+    if (playPos >= audioBufferSize)
+    {
         // If so, wrap it around to beginning again and reset write wrapped flag
         playPos -= audioBufferSize;
         writeWrapped = false;
@@ -271,15 +316,15 @@ static void PlayCallback(void* data, Uint8* stream, int len)
         callback(callbackData);
 }
 
-static void MixChannels(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontBuffer, INT16* leftRearBuffer, INT16* rightRearBuffer, void* dest, bool flipStereo)
+static void MixChannels(unsigned numSamples, const float* leftFrontBuffer, const float* rightFrontBuffer, const float* leftRearBuffer, const float* rightRearBuffer, void* dest, bool flipStereo)
 {
     INT16* p = (INT16*)dest;
 
     if (nbHostAudioChannels == 1) {
         for (unsigned i = 0; i < numSamples; i++) {
             INT16 monovalue = MixINT16(
-                MixINT16((INT32)(leftFrontBuffer[i] * balanceFactorFrontLeft), (INT32)(rightFrontBuffer[i] * balanceFactorFrontRight)),
-                MixINT16((INT32)(leftRearBuffer[i] * balanceFactorRearLeft), (INT32)(rightRearBuffer[i] * balanceFactorRearRight)));
+                MixFloat(leftFrontBuffer[i] * balanceFactorFrontLeft,rightFrontBuffer[i] * balanceFactorFrontRight),
+                MixFloat(leftRearBuffer[i]  * balanceFactorRearLeft, rightRearBuffer[i]  * balanceFactorRearRight));
             *p++ = monovalue;
         }
     } else {
@@ -290,13 +335,15 @@ static void MixChannels(unsigned numSamples, INT16* leftFrontBuffer, INT16* righ
         case Game::QUAD_1_RRL_2_FRL:
             flipStereo = !flipStereo;
             break;
+        default: // all other types are left-before-right ordered and need no flip
+            break;
         }
 
         // Now order channels according to audio type
         if (nbHostAudioChannels == 2) {
             for (unsigned i = 0; i < numSamples; i++) {
-                INT16 leftvalue = MixINT16((INT32)(leftFrontBuffer[i] * balanceFactorFrontLeft), (INT32)(leftRearBuffer[i] * balanceFactorRearLeft));
-                INT16 rightvalue = MixINT16((INT32)(rightFrontBuffer[i]*balanceFactorFrontRight), (INT32)(rightRearBuffer[i]*balanceFactorRearRight));
+                INT16 leftvalue = MixINT16(leftFrontBuffer[i] * balanceFactorFrontLeft, leftRearBuffer[i] * balanceFactorRearLeft);
+                INT16 rightvalue = MixINT16(rightFrontBuffer[i]*balanceFactorFrontRight, rightRearBuffer[i]*balanceFactorRearRight);
                 if (flipStereo) // swap left and right channels
                 {
                     *p++ = rightvalue;
@@ -308,15 +355,15 @@ static void MixChannels(unsigned numSamples, INT16* leftFrontBuffer, INT16* righ
             }
         } else if (nbHostAudioChannels == 4) {
             for (unsigned i = 0; i < numSamples; i++) {
-                INT16 frontLeftValue = (INT16)(leftFrontBuffer[i]*balanceFactorFrontLeft);
-                INT16 frontRightValue = (INT16)(rightFrontBuffer[i]*balanceFactorFrontRight);
-                INT16 rearLeftValue = (INT16)(leftRearBuffer[i]*balanceFactorRearLeft);
-                INT16 rearRightValue = (INT16)(rightRearBuffer[i]*balanceFactorRearRight);
+                float frontLeftValue = leftFrontBuffer[i]*balanceFactorFrontLeft;
+                float frontRightValue = rightFrontBuffer[i]*balanceFactorFrontRight;
+                float rearLeftValue = leftRearBuffer[i]*balanceFactorRearLeft;
+                float rearRightValue = rightRearBuffer[i]*balanceFactorRearRight;
 
                 // Check game audio type
                 switch (AudioType) {
                 case Game::MONO: {
-                    INT16 monovalue = MixINT16(MixINT16(frontLeftValue, frontRightValue), MixINT16(rearLeftValue, rearRightValue));
+                    INT16 monovalue = MixINT16(MixFloat(frontLeftValue, frontRightValue), MixFloat(rearLeftValue, rearRightValue));
                     *p++ = monovalue;
                     *p++ = monovalue;
                     *p++ = monovalue;
@@ -346,15 +393,15 @@ static void MixChannels(unsigned numSamples, INT16* leftFrontBuffer, INT16* righ
                     // Normal channels Front Left/Right then Rear Left/Right
                     if (flipStereo) // swap left and right channels
                     {
-                        *p++ = frontRightValue;
-                        *p++ = frontLeftValue;
-                        *p++ = rearRightValue;
-                        *p++ = rearLeftValue;
+                        *p++ = ClampINT16(frontRightValue);
+                        *p++ = ClampINT16(frontLeftValue);
+                        *p++ = ClampINT16(rearRightValue);
+                        *p++ = ClampINT16(rearLeftValue);
                     } else {
-                        *p++ = frontLeftValue;
-                        *p++ = frontRightValue;
-                        *p++ = rearLeftValue;
-                        *p++ = rearRightValue;
+                        *p++ = ClampINT16(frontLeftValue);
+                        *p++ = ClampINT16(frontRightValue);
+                        *p++ = ClampINT16(rearLeftValue);
+                        *p++ = ClampINT16(rearRightValue);
                     }
                 } break;
 
@@ -363,15 +410,15 @@ static void MixChannels(unsigned numSamples, INT16* leftFrontBuffer, INT16* righ
                     // Reversed channels Front/Rear Left then Front/Rear Right
                     if (flipStereo) // swap left and right channels
                     {
-                        *p++ = rearRightValue;
-                        *p++ = rearLeftValue;
-                        *p++ = frontRightValue;
-                        *p++ = frontLeftValue;
+                        *p++ = ClampINT16(rearRightValue);
+                        *p++ = ClampINT16(rearLeftValue);
+                        *p++ = ClampINT16(frontRightValue);
+                        *p++ = ClampINT16(frontLeftValue);
                     } else {
-                        *p++ = rearLeftValue;
-                        *p++ = rearRightValue;
-                        *p++ = frontLeftValue;
-                        *p++ = frontRightValue;
+                        *p++ = ClampINT16(rearLeftValue);
+                        *p++ = ClampINT16(rearRightValue);
+                        *p++ = ClampINT16(frontLeftValue);
+                        *p++ = ClampINT16(frontRightValue);
                     }
                     break;
 
@@ -438,21 +485,15 @@ Result OpenAudio(const Util::Config::Node& config)
     case Game::STEREO_RL:
         nbHostAudioChannels = std::min(nbHostAudioChannels, 2);
         break;
+    default: // quad types need up to 4 channels; config value already defaults to 4
+        break;
     }
     // Mixer Balance
-    float balancelr = (float)s_config->Get("BalanceLeftRight").ValueAs<float>();
-    if (balancelr < -100.0f)
-        balancelr = -100.0f;
-    else if (balancelr > 100.0f)
-        balancelr = 100.0f;
+    float balancelr = std::max(-100.f, std::min(100.f, s_config->Get("BalanceLeftRight").ValueAs<float>()));
     balancelr *= 0.01f;
     BalanceLeftRight = balancelr;
 
-    float balancefr = (float)s_config->Get("BalanceFrontRear").ValueAs<float>();
-    if (balancefr < -100.0f)
-        balancefr = -100.0f;
-    else if (balancefr > 100.0f)
-        balancefr = 100.0f;
+    float balancefr = std::max(-100.f, std::min(100.f, s_config->Get("BalanceFrontRear").ValueAs<float>()));
     balancefr *= 0.01f;
     BalanceFrontRear = balancefr;
 
@@ -462,8 +503,7 @@ Result OpenAudio(const Util::Config::Node& config)
     balanceFactorRearRight  = (BalanceLeftRight > 0.f ? 1.f - BalanceLeftRight : 1.f) * (BalanceFrontRear > 0 ? 1.f - BalanceFrontRear : 1.f);
 
     // Set up audio specification
-    SDL_AudioSpec desired;
-    memset(&desired, 0, sizeof(SDL_AudioSpec));
+    SDL_AudioSpec desired{};
     desired.freq = SAMPLE_RATE_M3;
     // Number of host channels to use (choice limited to 1,2,4)
     desired.channels = nbHostAudioChannels;
@@ -482,14 +522,8 @@ Result OpenAudio(const Util::Config::Node& config)
         }
     }
 
-    float soundFreq_Hz = (float)s_config->Get("SoundFreq").ValueAs<float>();
-    if (soundFreq_Hz>MAX_SND_FREQ)
-        soundFreq_Hz = MAX_SND_FREQ;
-    if (soundFreq_Hz<MIN_SND_FREQ)
-        soundFreq_Hz = MIN_SND_FREQ;
-    samples_per_frame_host = (INT32)(SAMPLE_RATE_M3 / soundFreq_Hz);
     bytes_per_sample_host = (nbHostAudioChannels * sizeof(INT16));
-    bytes_per_frame_host =  (samples_per_frame_host * bytes_per_sample_host);
+    bytes_per_frame_host =  (SAMPLES_PER_FRAME_M3 * bytes_per_sample_host);
 
 
     // Create audio buffer
@@ -508,32 +542,71 @@ Result OpenAudio(const Util::Config::Node& config)
     }
     memset(audioBuffer, 0, sizeof(INT8) * audioBufferSize);
 
-    // Set initial play position to be beginning of buffer and initial write position to be half-way into buffer
-    playPos = 0;
-    uint32_t endOfBuffer = bufferSize - bytes_per_frame_host;
-    uint32_t midpointAfterFirstFrameUnaligned = bytes_per_frame_host + (bufferSize - bytes_per_frame_host) / 2;
-    uint32_t extraPaddingNeeded = (bytes_per_frame_host - midpointAfterFirstFrameUnaligned % bytes_per_frame_host) % bytes_per_frame_host;
-    uint32_t midpointAfterFirstFrame = midpointAfterFirstFrameUnaligned + extraPaddingNeeded;
-    if (!((endOfBuffer % (nbHostAudioChannels*sizeof(INT16))) == 0)) {
-        return ErrorLog("must be an integer multiple of the sample size\n");
-    }
-    if (!((midpointAfterFirstFrame % nbHostAudioChannels*sizeof(INT16)) == 0)) {
-        return ErrorLog("must be an integer multiple of the sample size\n");
-    }
+    // Amount of audio to keep queued. The rest of the buffer is headroom for slow frames.
+    targetFillBytes = ((SAMPLE_RATE_M3 * targetLatencyMs) / 1000) * bytes_per_sample_host;
+    targetFillBytes = std::min<UINT32>(targetFillBytes, audioBufferSize - 3 * bytes_per_frame_host);
 
-    writePos = std::min<int>(endOfBuffer, midpointAfterFirstFrame);
+    // Set initial play position to be beginning of buffer and initial write position the target amount ahead of it
+    playPos = 0;
+    writePos = targetFillBytes;
     writeWrapped = false;
 
     // Reset counters
     underRuns = 0;
     overRuns = 0;
 
+    // Reset rate control
+    rateErrorFiltered = 0.0;
+    rateErrorIntegral = 0.0;
+    resamplePhase = -1.0;
+    memset(resamplePrev, 0, sizeof(resamplePrev));
+
     // Start audio playing
     SDL_PauseAudio(0);
     return Result::OKAY;
 }
 
-bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontBuffer, INT16* leftRearBuffer, INT16* rightRearBuffer, bool flipStereo)
+// Playback speed for the next frame (1.0 = as generated), from how far the queue is from its target
+static double UpdateRateControl(UINT32 queuedBytes)
+{
+    double error = ((double)queuedBytes - (double)targetFillBytes) / (double)targetFillBytes;
+    rateErrorFiltered += 0.1 * (error - rateErrorFiltered);
+    rateErrorIntegral = std::max(-500.0, std::min(500.0, rateErrorIntegral + rateErrorFiltered));
+    // Gains give a well damped loop (damping ratio about 0.9, settling in about 10 s). The queue moves 20x the speed
+    // adjustment (in fractions of the 50 ms target per second), so larger gains oscillate.
+    double adjust = 0.01 * rateErrorFiltered + 0.00001 * rateErrorIntegral;
+    adjust = std::max(-maxRateAdjust, std::min(maxRateAdjust, adjust));
+    return 1.0 - adjust;	// more queued than the target: make fewer samples
+}
+
+// Linear interpolation from numSamples input samples to about numSamples * ratio output samples. The phase and the
+// last input sample are carried between frames, so the output is continuous (it lags the input by one sample).
+static unsigned Resample(unsigned numSamples, double ratio, const float* const in[4], float* const out[4])
+{
+    const double step = 1.0 / ratio;	// input samples per output sample
+    const double end = (double)(numSamples - 1);
+    double pos = resamplePhase;
+    unsigned n = 0;
+    while (pos < end && n < MAX_OUTPUT_SAMPLES)
+    {
+        int i = (int)std::floor(pos);
+        float frac = (float)(pos - i);
+        for (int c = 0; c < 4; c++)
+        {
+            float a = (i < 0) ? resamplePrev[c] : in[c][i];
+            float b = in[c][i + 1];
+            out[c][n] = a + (b - a) * frac;
+        }
+        n++;
+        pos += step;
+    }
+    resamplePhase = std::max(-1.0, pos - (double)numSamples);
+    for (int c = 0; c < 4; c++)
+        resamplePrev[c] = in[c][numSamples - 1];
+    return n;
+}
+
+bool OutputAudio(unsigned numSamples, const float* leftFrontBuffer, const float* rightFrontBuffer, const float* leftRearBuffer, const float* rightRearBuffer, bool flipStereo)
 {
     //printf("OutputAudio(%u) [writePos = %u, writeWrapped = %s, playPos = %u, audioBufferSize = %u]\n",
     //	numSamples, writePos, (writeWrapped ? "true" : "false"), playPos, audioBufferSize);
@@ -542,12 +615,44 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
     UINT32 bytesToCopy;
     INT16* src;
 
-    // Number of samples should never be more than max number of samples per frame
-    if (numSamples > (unsigned)samples_per_frame_host)
-        numSamples = samples_per_frame_host;
+    // Number of samples should never be more than the longest frame
+    if (numSamples > MAX_INPUT_SAMPLES)
+        numSamples = MAX_INPUT_SAMPLES;
+    if (numSamples == 0)
+        return false;
+
+    // Rate control applies when audio is generated once per emulated frame. With an audio callback, the sound board
+    // thread is already paced by the sound card. The rate control state is updated with the lock held because the
+    // callback resets it after an under-run (RestartQueue()).
+    SDL_LockAudio();
+    bool frameDriven = (callback == nullptr);
+    UINT32 queuedBytes = ((writePos < playPos) ? writePos + audioBufferSize : writePos) - playPos;
+    double rate = frameDriven ? UpdateRateControl(queuedBytes) : 1.0;
+    SDL_UnlockAudio();
+
+    static float resampled[4][MAX_OUTPUT_SAMPLES];
+    if (frameDriven)
+    {
+        const float* const in[4] = { leftFrontBuffer, rightFrontBuffer, leftRearBuffer, rightRearBuffer };
+        float* const out[4] = { resampled[0], resampled[1], resampled[2], resampled[3] };
+        numSamples = Resample(numSamples, rate, in, out);
+        leftFrontBuffer = resampled[0];
+        rightFrontBuffer = resampled[1];
+        leftRearBuffer = resampled[2];
+        rightRearBuffer = resampled[3];
+    }
+    else
+    {
+        // Keep the resampler's history current, in case the sound board thread stops
+        resamplePhase = -1.0;
+        resamplePrev[0] = leftFrontBuffer[numSamples - 1];
+        resamplePrev[1] = rightFrontBuffer[numSamples - 1];
+        resamplePrev[2] = leftRearBuffer[numSamples - 1];
+        resamplePrev[3] = rightRearBuffer[numSamples - 1];
+    }
 
     // Mix together left and right channels into single chunk of data
-    INT16 mixBuffer[NUM_CHANNELS_M3 * (SAMPLE_RATE_M3 / MIN_SND_FREQ)];
+    INT16 mixBuffer[NUM_CHANNELS_M3 * MAX_OUTPUT_SAMPLES];
     MixChannels(numSamples, leftFrontBuffer, rightFrontBuffer, leftRearBuffer, rightRearBuffer, mixBuffer, flipStereo);
 
     // Lock SDL audio callback so that it doesn't interfere with following code
@@ -559,20 +664,27 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
     // Get end of current play region (writing must occur past this point)
     UINT32 playEndPos = playPos + bytes_per_frame_host;
 
-    // Undo any wrap-around of the write position that may have occured to create following ordering: playPos < playEndPos < writePos
+    // Undo any wrap-around of the write position that may have occurred to create following ordering: playPos < playEndPos < writePos
     if (playEndPos > writePos && writeWrapped)
         writePos += audioBufferSize;
 
     // Check if play region has caught up with write position and now overlaps it (ie buffer under-run)
-	if (playEndPos > writePos)
-	{
+    if (playEndPos > writePos)
+    {
         underRuns++;
 
         //printf("Audio buffer under-run #%u in OutputAudio(%u) [writePos = %u, writeWrapped = %s, playPos = %u, audioBufferSize = %u, numBytes = %u]\n",
         //	underRuns, numSamples, writePos, (writeWrapped ? "true" : "false"), playPos, audioBufferSize, numBytes);
 
         // See what action to take on under-run
-		if (underRunLoop)
+        if (frameDriven)
+        {
+            // Restart with the target amount queued, then write this frame after it
+            RestartQueue();
+            if (writeWrapped)
+                writePos += audioBufferSize;
+        }
+		else if (underRunLoop)
 		{
             // If loop, then move play position back to beginning of data in buffer
             playPos = writePos + numBytes + bytes_per_frame_host;
@@ -602,15 +714,16 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
     // Check if write position has caught up with play region and now overlaps it (ie buffer over-run)
     bool overRun = writePos + numBytes > playPos + audioBufferSize;
 
-    bool bufferFull = writePos + 2 * bytes_per_frame_host > playPos + audioBufferSize;
+    UINT32 queuedEnd = (writePos < playPos) ? writePos + audioBufferSize : writePos;
+    bool bufferFull = queuedEnd + numBytes >= playPos + targetFillBytes;
 
     // Move write position back to within buffer
     if (writePos >= audioBufferSize)
         writePos -= audioBufferSize;
 
     // Handle buffer over-run
-	if (overRun)
-	{
+    if (overRun)
+    {
         overRuns++;
 
         //printf("Audio buffer over-run #%u in OutputAudio(%u) [writePos = %u, writeWrapped = %s, playPos = %u, audioBufferSize = %u, numBytes = %u]\n",
@@ -619,9 +732,9 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
         bufferFull = true;
 
         // Discard current chunk of data
-        goto Finish;
     }
-
+    else
+    {
     src = mixBuffer;
     INT8* dst1;
     INT8* dst2;
@@ -641,7 +754,7 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
 	{
         // Otherwise, just copy whole region
         dst1 = audioBuffer + writePos;
-        dst2 = 0;
+        dst2 = NULL;
         len1 = numBytes;
         len2 = 0;
     }
@@ -672,8 +785,8 @@ bool OutputAudio(unsigned numSamples, INT16* leftFrontBuffer, INT16* rightFrontB
         writePos -= audioBufferSize;
         writeWrapped = true;
     }
+    }
 
-Finish:
     // Unlock SDL audio callback
     SDL_UnlockAudio();
 
@@ -687,9 +800,6 @@ void CloseAudio()
     SDL_CloseAudio();
 
     // Delete audio buffer
-	if (audioBuffer != NULL)
-	{
-        delete[] audioBuffer;
-        audioBuffer = NULL;
-    }
+    delete[] audioBuffer;
+    audioBuffer = nullptr;
 }

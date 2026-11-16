@@ -23,6 +23,14 @@ object AssetInstaller {
 
         // If list() returns empty, it's a file.
         if (children.isEmpty()) {
+            // Game/music databases come from upstream Supermodel and must match the
+            // emulator core, so they are refreshed whenever the bundled copy changes.
+            val alwaysRefresh = assetPath == "Config/Games.xml" || assetPath == "Config/Music.xml"
+            if (alwaysRefresh && dest.exists()) {
+                val bundled = assets.open(assetPath).use { it.readBytes() }
+                if (!bundled.contentEquals(dest.readBytes())) dest.writeBytes(bundled)
+                return
+            }
             if (!dest.exists()) {
                 dest.parentFile?.mkdirs()
                 assets.open(assetPath).use { input ->

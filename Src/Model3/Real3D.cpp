@@ -1,7 +1,7 @@
 /**
  ** Supermodel
  ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
+ ** Copyright 2003-2026 The Supermodel Team
  **
  ** This file is part of Supermodel.
  **
@@ -27,18 +27,224 @@
  *
  * PCI IDs
  * -------
- * It appears that Step 2.0 returns a different PCI ID depending on whether
- * the PCI configuration space or DMA register are accessed. For example,
- * Virtual On 2 expects 0x178611DB from the PCI configuration header but
- * 0x16C311DB from the DMA device.
+ * It appears that accessing the PCI configuration space returns the PCI ID
+ * of Mercury (0x16C311DB) on Step 1.x and the DMA device (0x178611DB) on
+ * Step 2.x, while accessing the Step 2.x DMA device register returns the
+ * PCI ID of Mercury. Step 2.x games by AM3 expect this behavior.
  *
  * To-Do List
  * ----------
  * - For consistency, the status registers should probably be byte reversed (this is a
  *   little endian device), forcing the Model3 Read32/Write32 handlers to
  *   manually reverse the data. This keeps with the convention for VRAM.
- * - Keep an eye out for games writing non-mipmap textures to the mipmap area.
- *   The render currently cannot cope with this.
+ * 
+ * Rendering
+ * ---------
+ * Supermodel draws one frame for each emulated frame. RenderFrame() tells
+ * the renderer to draw the scene that is in Real3D memory. In multi-threaded
+ * mode, the renderer reads the read-only snapshots, which SyncSnapshots()
+ * updates once for each frame. No command starts the drawing.
+ *
+ * Model 3:
+ *
+ * Two signals tell when the data for a frame is complete:
+ *
+ *   Command port (0x88000000)  Flush(). The CPU wrote all the data for the
+ *                              frame.
+ *   Tile generator             TilegenDrawFrame(). The tile generator draws
+ *                              a frame.
+ *
+ * When both signals occur for a frame, DrawFrame() latches the block culling
+ * bit (Mercury mode word, bit 2). This bit can stop the display of the 3D
+ * scene. DrawFrame() does not draw. Signals that occur after the ping-pong
+ * flip apply to the next frame: BeginVBlank() then applies the update
+ * buffers, uploads the textures if the command port was written, and calls
+ * DrawFrame() if both signals occurred.
+ *
+ * Textures:
+ *
+ *   Texture FIFO (0x94000000)  WriteTextureFIFO() keeps the words. The
+ *                              textures are uploaded when the command port
+ *                              is written (before the flip) or in
+ *                              BeginVBlank() (after the flip).
+ *   Texture port (0x90000000)  WriteTexturePort(). Step 1.0: the data is the
+ *                              word address of a texture block in VROM, and
+ *                              the block goes into the texture FIFO. Step
+ *                              2.x: two words (address and header), and the
+ *                              texture is uploaded immediately. Addresses
+ *                              below 0x100000 are in polygon RAM.
+ *
+ * Texture RAM is 8 MB: two pages of 2048x1024 16-bit texels.
+ *
+ * Real3D Pro-1000 (hypothesis):
+ *
+ * The Pro-1000 has no tile generator. Thus TilegenDrawFrame() does not occur,
+ * DrawFrame() does not occur, and block culling stays off. The firmware
+ * writes the command port (REND_UPDATE_COMPL) after it processes the update
+ * from the host. This uploads the textures. Supermodel draws each frame from
+ * memory, as for Model 3.
+ *
+ * The hypothesis is that the Pro-1000 draws continuously, one frame for each
+ * field, and that REND_UPDATE_COMPL marks the end of an update. The firmware
+ * sends no command to draw. For each frame, it processes the update from the
+ * host, writes REND_UPDATE_COMPL, waits for the geometry processor sync, and
+ * reports "render done" in the status packet. The host reads the status
+ * packet before it sends the next frame.
+ *
+ * Difference: Supermodel draws at the end of each emulated frame, not when
+ * REND_UPDATE_COMPL is written. The update buffers (see below) hold only the
+ * writes that occur after the flip. Writes before the flip go directly to
+ * memory. Thus a frame can show part of an update that is not complete. This
+ * was not seen in the SDK demos.
+ *
+ * Update Buffers
+ * --------------
+ * Model 3:
+ *
+ * The Real3D draws a frame while the CPU sends the data for the next frame.
+ * The ping_pong status bit flips during the frame, often at about 66% of the
+ * frame time (the line is a tile generator register). After the flip, writes
+ * to high culling RAM and polygon RAM must not change the frame that is
+ * drawn. Supermodel keeps these writes in update buffers in low culling RAM
+ * and applies them at the start of the next VBlank (BeginVBlank()).
+ *
+ * The configuration registers (0x9C000000, WriteConfigurationRegister()) give
+ * the sizes of the buffers in 32-bit words:
+ *
+ *   reg 0 (pingPongMemSize)           The high culling RAM buffer is words
+ *                                     0 to reg 0 - 1 of low culling RAM.
+ *   reg 8 (pingPongAndUpdateMemSize)  The polygon RAM buffer is words reg 0
+ *                                     to reg 8 - 1 of low culling RAM.
+ *
+ * All Model 3 games that were examined write these registers when they boot,
+ * before they write data after a flip: Virtua Fighter 3 and Bass Fishing
+ * (Step 1.0), Scud Race and The Lost World (Step 1.5), Sega Rally 2, Harley-
+ * Davidson, Ski Champ, Fighting Vipers 2, and Virtual On 2 (Step 2.0),
+ * Daytona USA 2, Spikeout, Emergency Call Ambulance, Magical Truck Adventure,
+ * La Machine Guns, Dirt Devils, and Star Wars Trilogy (Step 2.1). The values
+ * are 0x5FFC to 0xBFFC for reg 0 and 0x18000 to 0x40000 for reg 8.
+ *
+ * A buffer is a list of blocks (UpdateBlock). A block has a start address, an
+ * end address, and the data for these consecutive addresses. The buffers
+ * operate only if the registers give an area for them (reg 8 > reg 0). A
+ * buffer cannot go outside its area. If a buffer is full, it is applied
+ * immediately and the write goes directly to memory. Writes from a buffer
+ * cannot go outside the memory that they update.
+ *
+ * Real3D Pro-1000:
+ *
+ * The Pro-1000 has the same architecture. Its SDK gives a "ping-pong memory"
+ * in high culling RAM (PRO_PINGPONG_BASE = 0x8E000000) and an "update memory"
+ * (PRO_AbbreviatedConfigureMemory()), and its status packet has a ping_pong
+ * bit. The same three values configure the buffers, but the firmware does not
+ * write them to 0x9C000000. It sends them to the Mercury ASIC through JTAG
+ * (instruction 0x09). In Supermodel, an update of that JTAG register writes
+ * the configuration registers (see "Update Memory Configuration" in
+ * Pro1000.cpp). The firmware sends values from the SCSI ROM at boot. The host
+ * sends values when it starts (the SDK demos send 0x8000, 0, 0x20000).
+ * Supermodel does not have the real SCSI ROM. The synthetic SCSI ROM
+ * (SyntheticSCSIROM.cpp) contains valid values (0x7FFC, 0x4, 0x20000). Thus
+ * the configuration registers are valid after boot.
+ *
+ * The time of the flip on the Pro-1000 is not known: it has no tile
+ * generator. Supermodel flips the bit at the line that most Model 3 games
+ * program (PING_PONG_FLIP_LINE in Pro1000.cpp).
+ *
+ * Without configuration:
+ *
+ * The update buffers are always emulated. They operate only when the
+ * configuration registers give an area for them (reg 8 > reg 0). Before the
+ * configuration registers are written (they are zero after reset), there are
+ * no buffers and all writes go directly to memory. Earlier versions put both
+ * buffers at the start of low culling RAM when the registers were zero. On
+ * the Pro-1000, the firmware writes scene data there directly. This data
+ * changed the buffers and caused writes outside polygon RAM (a crash).
+ *
+ * TODO: Physical Ping-Pong Memory (hypothesis, not emulated)
+ *
+ * Supermodel has one high culling RAM (0x8E000000) that is separate from low
+ * culling RAM. The ping_pong bit flips, but no memory changes. The evidence
+ * below shows that the hardware is different.
+ *
+ * The SDK (PRO_AbbreviatedConfigureMemory(), Developer's Guide 4.0e) gives
+ * the two sizes:
+ *
+ *  - Ping-pong memory (reg 0): the culling memory where viewports,
+ *    animation sequences, and databases are stored. The API objects for
+ *    viewports, matrices, databases, animation sequences, and indirection
+ *    tables are "ping-pong data blocks".
+ *  - Update memory (reg 8 - reg 0): the largest amount of data that the
+ *    application sends to the renderer. The default (PRO_UPDATE_MEMSIZE) is
+ *    96K words (393216 bytes). The application can change it.
+ *
+ * 1. Two ping-pong memories (strong evidence)
+ *
+ * There are two physical ping-pong memories, A and B. The renderer draws
+ * from one of them. A write to 0x8E000000 (culling address 0x800000 + i)
+ * goes only to the other one. They swap at a frame boundary after an update
+ * is complete (REND_UPDATE_COMPL). Thus data that must stay in ping-pong
+ * memory must be written to both memories. Evidence:
+ *
+ *  - Model 3 games write their ping-pong data again in each frame, or they
+ *    write it exactly two times in two consecutive frames. Data that was
+ *    not written for 60 frames or more, at frame 1800 of the attract mode:
+ *    Scud Race: 590 words written exactly two times, all one frame apart,
+ *    and no word written only once. Virtua Fighter 3: 2927 words written
+ *    exactly two times, 2926 of them one frame apart. Daytona USA 2: 632
+ *    words written exactly two times, all one frame apart.
+ *  - The SDK demo Bayou writes all of its ping-pong data (2266 words, words
+ *    0 to 0x7FFF) again in each update. It does not send an update in every
+ *    frame. Thus the swap probably occurs after an update, not in each
+ *    frame.
+ *  - The Pro-1000 firmware writes each word to 0x8E000000 two times, with an
+ *    update complete and a frame boundary between the writes (0x10984, the
+ *    monitor write command at 0xFDE4).
+ *  - The firmware rejects writes to 0x8E000000 above reg 0 ("PPO"). The
+ *    0x8E000000 data of Bayou ends at reg 0 (0x8000).
+ *  - Mercury mode word bit 4 is "Block PingPong" and bit 5 is "Force
+ *    PingPong" (bit names in the Pro-1000 firmware). The firmware does not
+ *    set them. Only the monitor can.
+ *
+ * 2. Ping-pong memory A is low culling RAM (weak evidence)
+ *
+ * One of the two memories is possibly at the start of low culling RAM
+ * (0x8C000000, low culling words 0 to reg 0 - 1). Two versions:
+ *
+ *  a. The windows swap. At any time, one memory is at 0x8C000000 and the
+ *     other is at 0x8E000000: A at 0x8C000000 and B at 0x8E000000, then after
+ *     a flip, B at 0x8C000000 and A at 0x8E000000.
+ *  b. 0x8C000000 is always memory A. 0x8E000000 changes between A and B at
+ *     each flip. When 0x8E000000 is A, the two windows get the same memory.
+ *     The location of B is not known (it possibly has no CPU address).
+ *
+ * Evidence (see "Update Memory Configuration" in Pro1000.cpp):
+ *
+ *  - With reg 0 = 0x45, Bayou writes a complete scene (a viewport, a pointer
+ *    list, a matrix, and a culling node) to low culling words 0-0x44 through
+ *    0x8C000000. Its pointers are culling addresses 0x800000 + i, which are
+ *    correct only if word i of that area is culling address 0x800000 + i.
+ *    But there is no evidence that the renderer draws this scene: Bayou
+ *    replaces it soon after through 0x8E000000.
+ *  - Hosts put their own culling data above reg 8 (Asia: 0x20000, Bayou:
+ *    0x40000). The Model 3 games that were examined do not write low culling
+ *    RAM below word 0x20000.
+ *
+ * Problem: the Pro-1000 shows a spinning logo at power-on. The firmware
+ * loads the culling block of the SCSI ROM through 0x8C000000 one time
+ * (rend_init), and it does not write the scene through 0x8E000000. If
+ * 0x8C000000 gets only one ping-pong memory, the logo is in only one memory
+ * and is not shown in each frame. Thus part 2 is possibly not correct, or
+ * the hardware writes the culling block to both memories in a way that is
+ * not known.
+ *
+ * To do:
+ *
+ *  1. Find how the flip operates (which memory each window and the renderer
+ *     use, where the second memory is, and what swaps them), then emulate
+ *     the two ping-pong memories.
+ *  2. If part 2 is correct, keep both update buffers in update memory (low
+ *     culling words reg 0 to reg 8 - 1). Do not use words 0 to reg 0 - 1:
+ *     they are then a ping-pong memory.
  */
 
 #include "Real3D.h"
@@ -47,35 +253,29 @@
 #include "JTAG.h"
 #include "CPU/PowerPC/ppc.h"
 #include "Util/BMPFile.h"
+#include "Util/BitCast.h"
 #include <cstring>
 #include <algorithm>
 
 // Macros that divide memory regions into pages and mark them as dirty when they are written to
 #define PAGE_WIDTH 12
 #define PAGE_SIZE (1<<PAGE_WIDTH)
-#define DIRTY_SIZE(arraySize) (1+(arraySize-1)/(8*PAGE_SIZE))
-#define MARK_DIRTY(dirtyArray, addr) dirtyArray[addr>>(PAGE_WIDTH+3)] |= 1<<((addr>>PAGE_WIDTH)&7)
+#define DIRTY_SIZE(arraySize) (1+((arraySize)-1)/(8*PAGE_SIZE))
+#define MARK_DIRTY(dirtyArray, addr) dirtyArray[(addr)>>(PAGE_WIDTH+3)] |= 1<<(((addr)>>PAGE_WIDTH)&7)
 
-// Offsets of memory regions within Real3D memory pool
-#define OFFSET_8C           0x0000000 // 4 MB, culling RAM low (at 0x8C000000)
-#define OFFSET_8E           0x0400000 // 1 MB, culling RAM high (at 0x8E000000)
-#define OFFSET_98           0x0500000 // 4 MB, polygon RAM (at 0x98000000)
-#define OFFSET_TEXRAM       0x0900000 // 8 MB, texture RAM
-#define OFFSET_TEXFIFO      0x1100000 // 1 MB, texture FIFO
-#define MEM_POOL_SIZE_RW    (0x400000+0x100000+0x400000+0x800000+0x100000)
-#define OFFSET_8C_RO        0x1200000 // 4 MB, culling RAM low (at 0x8C000000)  [read-only snapshot]
-#define OFFSET_8E_RO        0x1600000 // 1 MB, culling RAM high (at 0x8E000000) [read-only snapshot]
-#define OFFSET_98_RO        0x1700000 // 4 MB, polygon RAM (at 0x98000000)      [read-only snapshot]
-#define OFFSET_TEXRAM_RO    0x1B00000 // 8 MB, texture RAM                      [read-only snapshot]
-#define MEM_POOL_SIZE_RO    (0x400000+0x100000+0x400000+0x800000)
-#define OFFSET_8C_DIRTY     0x2300000
-#define OFFSET_8E_DIRTY     (OFFSET_8C_DIRTY+DIRTY_SIZE(0x400000))
-#define OFFSET_98_DIRTY     (OFFSET_8E_DIRTY+DIRTY_SIZE(0x100000))
-#define OFFSET_TEXRAM_DIRTY (OFFSET_98_DIRTY+DIRTY_SIZE(0x400000))
-#define MEM_POOL_SIZE_DIRTY (DIRTY_SIZE(MEM_POOL_SIZE_RO))
-#define MEMORY_POOL_SIZE  (MEM_POOL_SIZE_RW+MEM_POOL_SIZE_RO+MEM_POOL_SIZE_DIRTY)
+// Sizes of memory regions (bytes). Polygon RAM size is in the hardware
+// configuration (Real3DConfig).
+static constexpr uint32_t CULLING_RAM_LO_SIZE = 0x400000;  // 4 MB at 0x8C000000
+static constexpr uint32_t CULLING_RAM_HI_SIZE = 0x100000;  // 1 MB at 0x8E000000
+static constexpr uint32_t TEXTURE_RAM_SIZE    = 0x800000;  // 8 MB
+static constexpr uint32_t TEXTURE_FIFO_SIZE   = 0x100000;  // 1 MB
 
-static void UpdateRenderConfig(IRender3D *Render3D, uint64_t internalRenderConfig[]);
+// The memory pool holds, in this sequence: the writable regions (culling RAM
+// low, culling RAM high, polygon RAM, texture RAM, texture FIFO), the
+// read-only snapshots of the first four regions, and the dirty page arrays.
+// Save states contain the writable regions. With the Model 3 configuration,
+// the layout is the same as in earlier versions, so save states stay
+// compatible.
 
 
 /******************************************************************************
@@ -86,7 +286,7 @@ void CReal3D::SaveState(CBlockFile *SaveState)
 {
   SaveState->NewBlock("Real3D", __FILE__);
 
-  SaveState->Write(memoryPool, MEM_POOL_SIZE_RW); // Don't write out read-only snapshots or dirty page arrays
+  SaveState->Write(memoryPool, m_layout.sizeRW); // Don't write out read-only snapshots or dirty page arrays
   SaveState->Write(&fifoIdx, sizeof(fifoIdx));
   SaveState->Write(m_vromTextureFIFO, sizeof(m_vromTextureFIFO));
 
@@ -102,13 +302,25 @@ void CReal3D::SaveState(CBlockFile *SaveState)
   SaveState->Write(m_internalRenderConfig, sizeof(m_internalRenderConfig));
   SaveState->Write(commandPortWritten);
   SaveState->Write(&m_pingPong, sizeof(m_pingPong));
-  for (int i = 0; i < 39; i++)
-  {
-    uint8_t nul = 0;
-    SaveState->Write(&nul, sizeof(uint8_t));
+  SaveState->Write(&m_modeword, sizeof(m_modeword));
+  SaveState->Write(&m_vromTextureFIFOIdx, sizeof(m_vromTextureFIFOIdx));
+  SaveState->Write(&m_configRegisters, sizeof(m_configRegisters));
+
+  uint32_t polyUpdateBlockOffset = -1;
+  uint32_t highCullUpdateBlockOffset = -1;
+
+  // calculate block offsets in 32bit words
+  if (m_polyUpdateBlock) {
+      auto pStartAddr = cullingRAMLo + m_configRegisters.pingPongMemSize;
+      polyUpdateBlockOffset = (uint32_t)((uint32_t*)m_polyUpdateBlock - pStartAddr);
+  }
+  if (m_highRamUpdateBlock) {
+      auto pStartAddr = cullingRAMLo;
+      highCullUpdateBlockOffset = (uint32_t)((uint32_t*)m_highRamUpdateBlock - pStartAddr);
   }
 
-  SaveState->Write(&m_vromTextureFIFOIdx, sizeof(m_vromTextureFIFOIdx));
+  SaveState->Write(&polyUpdateBlockOffset, sizeof(polyUpdateBlockOffset));
+  SaveState->Write(&highCullUpdateBlockOffset, sizeof(highCullUpdateBlockOffset));
 }
 
 void CReal3D::LoadState(CBlockFile *SaveState)
@@ -119,7 +331,7 @@ void CReal3D::LoadState(CBlockFile *SaveState)
     return;
   }
 
-  SaveState->Read(memoryPool, MEM_POOL_SIZE_RW);
+  SaveState->Read(memoryPool, m_layout.sizeRW);
 
   // If multi-threaded, update read-only snapshots too
   if (m_gpuMultiThreaded)
@@ -137,18 +349,26 @@ void CReal3D::LoadState(CBlockFile *SaveState)
   SaveState->Read(&dmaConfig, sizeof(dmaConfig));
 
   SaveState->Read(m_internalRenderConfig, sizeof(m_internalRenderConfig));
-  UpdateRenderConfig(Render3D, m_internalRenderConfig);
-  SaveState->Read(&commandPortWritten);
+  SaveState->Read(commandPortWritten);
   SaveState->Read(&m_pingPong, sizeof(m_pingPong));
-  m_pingPongCopy = m_pingPong;
-  m_tilegenDrawFrame = false;
-  for (int i = 0; i < 39; i++)
-  {
-    uint8_t nul;
-    SaveState->Read(&nul, sizeof(uint8_t));
-  }
-
+  SaveState->Read(&m_modeword, sizeof(m_modeword));
+  Render3D->SetSunClamp((m_modeword[static_cast<int>(CASIC::Name::Mars)] & 0x40000) == 0);
+  Render3D->SetBlockCulling((m_modeword[static_cast<int>(CASIC::Name::Mercury)] & 4) == 4);
   SaveState->Read(&m_vromTextureFIFOIdx, sizeof(m_vromTextureFIFOIdx));
+  SaveState->Read(&m_configRegisters, sizeof(m_configRegisters));
+
+  uint32_t polyUpdateBlockOffset = 0;
+  uint32_t highCullUpdateBlockOffset = 0;
+  SaveState->Read(&polyUpdateBlockOffset, sizeof(polyUpdateBlockOffset));
+  SaveState->Read(&highCullUpdateBlockOffset, sizeof(highCullUpdateBlockOffset));
+
+  // use -1 to indicate null pointer
+  if (polyUpdateBlockOffset == (uint32_t)-1) { m_polyUpdateBlock = nullptr;}
+  else                                       { m_polyUpdateBlock = (UpdateBlock*)(cullingRAMLo + m_configRegisters.pingPongMemSize + polyUpdateBlockOffset); }
+
+  if (highCullUpdateBlockOffset == (uint32_t)-1) { m_highRamUpdateBlock = nullptr; }
+  else                                           { m_highRamUpdateBlock = (UpdateBlock*)(cullingRAMLo + highCullUpdateBlockOffset); }
+  
 }
 
 
@@ -156,37 +376,29 @@ void CReal3D::LoadState(CBlockFile *SaveState)
  Rendering
 ******************************************************************************/
 
-static void UpdateRenderConfig(IRender3D *Render3D, uint64_t internalRenderConfig[])
+
+void CReal3D::BeginVBlank()
 {
-  bool noSunClamp = (internalRenderConfig[0] & 0x800000) != 0 && (internalRenderConfig[1] & 0x400000) != 0;
-  bool shadeIsSigned = (internalRenderConfig[0] & 0x1) == 0;
-  Render3D->SetSunClamp(!noSunClamp);
-  Render3D->SetSignedShade(shadeIsSigned);
-}
+    // need to grab a copy at the start of the frame so we can see if it's flipped
+    m_pingPongCopy = m_pingPong;
 
-void CReal3D::BeginVBlank(int statusCycles)
-{
-  const bool legacyReal3D = m_config["LegacyReal3D"].ValueAsDefault<bool>(false);
-  const bool legacyTiming =
-    m_config["LegacyReal3DTiming"].ValueAsDefault<bool>(
-      m_config["LegacyStatusBit"].ValueAsDefault<bool>(false));
-  m_useLegacyStatusBit = legacyReal3D || legacyTiming;
-  if (m_useLegacyStatusBit)
-  {
-    statusChange = ppc_total_cycles() + statusCycles;
-    m_evenFrame = !m_evenFrame;
-  }
+    // sync any update buffers
+    SyncBufferedMem(m_highRamUpdateBlock, cullingRAMLo, cullingRAMHi, CULLING_RAM_HI_SIZE / 4, cullingRAMHiDirty);
+    SyncBufferedMem(m_polyUpdateBlock, cullingRAMLo + m_configRegisters.pingPongMemSize, polyRAM, m_hwConfig.polygonRAMSize / 4, polyRAMDirty);
 
-  if (legacyReal3D)
-    return;
+    // update write pointers
+    m_polyUpdateBlock = nullptr;
+    m_highRamUpdateBlock = nullptr;
 
-  m_pingPongCopy = m_pingPong;
+    // update any textures if they were written after the ping_pong time.
+    if (commandPortWritten) {
+        FlushTextures();
+    }
 
-  if (commandPortWritten)
-    FlushTextures();
-
-  if (m_tilegenDrawFrame && commandPortWritten)
-    DrawFrame();
+    // check to see if a complete frame was written after the ping_pong time
+    if (m_tilegenDrawFrame && commandPortWritten) {
+        DrawFrame();
+    }
 }
 
 void CReal3D::EndVBlank(void)
@@ -196,24 +408,24 @@ void CReal3D::EndVBlank(void)
 
 void CReal3D::FlipPingPongBit(void)
 {
-  if (m_config["LegacyReal3D"].ValueAsDefault<bool>(false))
-    return;
-  m_pingPong = !m_pingPong;
-  m_tilegenDrawFrame = false;
-  commandPortWritten = false;
+    m_pingPong = !m_pingPong;
+
+    // this is the last time writes can happen for this frame, any writes after are buffered for the next frame
+    // so we reset drawing flags here
+    m_tilegenDrawFrame = false;
+    commandPortWritten = false;
 }
 
 uint32_t CReal3D::SyncSnapshots(void)
 {
-  const bool legacyReal3D = m_config["LegacyReal3D"].ValueAsDefault<bool>(false);
-  if (legacyReal3D)
-    commandPortWritten = false;
   if (!m_gpuMultiThreaded)
     return 0;
 
   // Update read-only queue
   queuedUploadTexturesRO = queuedUploadTextures;
   queuedUploadTextures.clear();
+
+  Render3D->SetBlockCulling(m_blockCullingRO);
 
   // Update read-only snapshots
   return UpdateSnapshots(false);
@@ -265,12 +477,110 @@ uint32_t CReal3D::UpdateSnapshot(bool copyWhole, uint8_t *src, uint8_t *dst, uns
   }
 }
 
+void CReal3D::SyncBufferedMem(UpdateBlock* updateBlock, uint32_t* updateBuffer, uint32_t* dst, uint32_t dstWords, uint8_t* dirty)
+{
+    if (updateBlock) {                          // this is a pointer to the end of the buffer, or null if no data
+
+        auto ub = (UpdateBlock*)updateBuffer;   // this takes us back to the start
+
+        while (true) {
+
+            auto count      = ub->Count();
+            auto startAddr  = ub->startAddr;
+
+            for (auto i = 0u; i < count; i++) {
+
+                auto addr = startAddr + i;
+                if (addr >= dstWords) {         // AddToUpdateBuffer() prevents this; do not write outside memory
+                    break;
+                }
+                dst[addr] = ub->data[i];
+
+                if (m_gpuMultiThreaded) {
+                    MARK_DIRTY(dirty, (addr*4));
+                }
+            }
+
+            if (ub == updateBlock) break;      // last block
+
+            ub = ub->Next();    
+        }
+    }
+}
+
+void CReal3D::FlushTextures()
+{
+    // Upload textures (if any)
+    if (fifoIdx > 2) // If the texture header/data aren't present, discard the texture (prevents garbage textures in Ski Champ)
+    {
+        for (uint32_t i = 0; i < fifoIdx - 2; )
+        {
+            uint32_t size = 2 + textureFIFO[i + 0] / 2;
+            size /= 4;
+            uint32_t header = textureFIFO[i + 1]; // texture information header
+
+            // Spikeout seems to be uploading 0 length textures
+            if (0 == size)
+            {
+                DebugLog("Real3D: 0-length texture upload @ PC=%08X (%08X %08X %08X)\n", ppc_get_pc(), textureFIFO[i + 0], textureFIFO[i + 1], textureFIFO[i + 2]);
+                break;
+            }
+
+            UploadTexture(header, (uint16_t*)&textureFIFO[i + 2]);
+            DebugLog("Real3D: Texture upload completed: %X bytes (%X)\n", size * 4, textureFIFO[i + 0]);
+
+            i += size;
+        }
+    }
+
+    // Reset texture FIFO
+    fifoIdx = 0;
+}
+
+bool CReal3D::PollPingPong()
+{
+    return m_pingPong != m_pingPongCopy;
+}
+
+void CReal3D::DrawFrame()
+{
+    // on real h/w the frame should start drawing here
+    // we are drawing at the end of the frame time which does the same
+
+    m_tilegenDrawFrame = false;
+    commandPortWritten = false;
+
+    // we need the block culling state when a frame has been triggered for rendering
+    m_blockCullingRO = (m_modeword[static_cast<int>(CASIC::Name::Mercury)] & 4) == 4;
+
+    // todo figure out what exactly happens if a frame hasn't been triggered for rendering
+    // are we just drawing the previous frame that's left in the buffer
+    // or are we triggering white to draw
+
+    if (!m_gpuMultiThreaded) {
+        Render3D->SetBlockCulling(m_blockCullingRO);
+    }
+}
+
+void CReal3D::TilegenDrawFrame(uint32_t flags)
+{
+    m_tilegenDrawFrame = true;
+
+    bool pingPongFlipped = PollPingPong();
+
+    if (!pingPongFlipped) {
+        if (commandPortWritten) {
+            DrawFrame();
+        }
+    }
+}
+
 uint32_t CReal3D::UpdateSnapshots(bool copyWhole)
 {
   // Update all memory region snapshots
   uint32_t cullLoCopied  = UpdateSnapshot(copyWhole, (uint8_t*)cullingRAMLo, (uint8_t*)cullingRAMLoRO, 0x400000, cullingRAMLoDirty);
   uint32_t cullHiCopied  = UpdateSnapshot(copyWhole, (uint8_t*)cullingRAMHi, (uint8_t*)cullingRAMHiRO, 0x100000, cullingRAMHiDirty);
-  uint32_t polyCopied    = UpdateSnapshot(copyWhole, (uint8_t*)polyRAM,      (uint8_t*)polyRAMRO,      0x400000, polyRAMDirty);
+  uint32_t polyCopied    = UpdateSnapshot(copyWhole, (uint8_t*)polyRAM,      (uint8_t*)polyRAMRO,      m_hwConfig.polygonRAMSize, polyRAMDirty);
   uint32_t textureCopied = UpdateSnapshot(copyWhole, (uint8_t*)textureRAM,   (uint8_t*)textureRAMRO,   0x800000, textureRAMDirty);
   //printf("Read3D copied - cullLo:%4uK, cullHi:%4uK, poly:%4uK, texture:%4uK\n", cullLoCopied / 1024, cullHiCopied / 1024, polyCopied / 1024, textureCopied / 1024);
   return cullLoCopied + cullHiCopied + polyCopied + textureCopied;
@@ -294,7 +604,7 @@ void CReal3D::BeginFrame(void)
 
 void CReal3D::RenderFrame(void)
 {
-  Render3D->RenderFrame();
+    Render3D->RenderFrame();
 }
 
 void CReal3D::EndFrame(void)
@@ -309,13 +619,13 @@ void CReal3D::EndFrame(void)
 
 // Mipmap coordinates for each reduction level (within a single 2048x1024 page)
 
-static const int mipXBase[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
-static const int mipYBase[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023 };
-static const int mipDivisor[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 };
+static constexpr int mipXBase[] = { 0, 1024, 1536, 1792, 1920, 1984, 2016, 2032, 2040, 2044, 2046, 2047 };
+static constexpr int mipYBase[] = { 0, 512, 768, 896, 960, 992, 1008, 1016, 1020, 1022, 1023 };
+static constexpr int mipDivisor[] = { 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024 };
 
 // Tables of texel offsets corresponding to an NxN texel texture tile
 
-static const unsigned decode8x8[64] =
+static constexpr unsigned decode8x8[64] =
 {
    1, 0, 5, 4, 9, 8,13,12,
    3, 2, 7, 6,11,10,15,14,
@@ -327,7 +637,7 @@ static const unsigned decode8x8[64] =
   51,50,55,54,59,58,63,62
 };
 
-static const unsigned decode8x4[32] =
+static constexpr unsigned decode8x4[32] =
 {
    1, 0, 5, 4,
    3, 2, 7, 6,
@@ -339,7 +649,7 @@ static const unsigned decode8x4[32] =
   27,26,31,30
 };
 
-static const unsigned decode8x2[16] =
+static constexpr unsigned decode8x2[16] =
 {
    1, 0,
    3, 2,
@@ -353,8 +663,10 @@ static const unsigned decode8x2[16] =
 
 void CReal3D::StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigned width, unsigned height, const uint16_t *texData, bool sixteenBit, bool writeLSB, bool writeMSB, uint32_t &texDataOffset)
 {
-  uint32_t tileX = (std::min)(8u, width);
-  uint32_t tileY = (std::min)(8u, height);
+  const uint32_t tileX = (std::min)(8u, width);
+  const uint32_t tileY = (std::min)(8u, height);
+
+  const unsigned* const decode = (tileX == 8) ? decode8x8 : (tileX == 4) ? decode8x4 : (tileX == 2) ? decode8x2 : nullptr;
 
   texDataOffset = 0;
 
@@ -374,15 +686,7 @@ void CReal3D::StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigne
             if (m_gpuMultiThreaded)
               MARK_DIRTY(textureRAMDirty, destOffset * 2);
 
-            if (tileX == 8) {
-              textureRAM[destOffset++] = texData[decode8x8[yy * tileX + xx]];
-            }
-            else if (tileX == 4) {
-              textureRAM[destOffset++] = texData[decode8x4[yy * tileX + xx]];
-            }
-            else if (tileX == 2) {
-              textureRAM[destOffset++] = texData[decode8x2[yy * tileX + xx]];
-            }
+            textureRAM[destOffset++] = texData[decode[yy * tileX + xx]];
 
             texDataOffset++;
           }
@@ -405,8 +709,8 @@ void CReal3D::StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigne
 
     // Outer 2 loops: NxN tiles
     const uint8_t byteSelect = (uint8_t)writeLSB | ((uint8_t)writeMSB << 1);
-    uint16_t tempData;
-    const uint16_t byteMask[4] = {0xFFFF, 0xFF00, 0x00FF, 0x0000};
+    static constexpr uint16_t byteMask[4] = {0xFFFF, 0xFF00, 0x00FF, 0x0000};
+    const uint32_t offset = std::max(1u, (tileY * tileX) / 2);
     for (uint32_t y = yPos; y < (yPos + height); y += tileY)
     {
       for (uint32_t x = xPos; x < (xPos + width); x += tileX)
@@ -424,15 +728,7 @@ void CReal3D::StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigne
               const uint8_t shift = (8 * ((xx & 1) ^ 1));
               const uint8_t index = (yy ^ 1) * tileX + (xx ^ 1) - (tileX & 1);
 
-              if (tileX == 8) {
-                tempData = (texData[decode8x8[index] / 2] >> shift) & 0xFF;
-              }
-              else if (tileX == 4) {
-                tempData = (texData[decode8x4[index] / 2] >> shift) & 0xFF;
-              }
-              else if (tileX == 2) {
-                tempData = (texData[decode8x2[index] / 2] >> shift) & 0xFF;
-              }
+              uint16_t tempData = (texData[decode[index] / 2] >> shift) & 0xFF;
 
               tempData |= tempData << 8;
               tempData &= byteMask[byteSelect] ^ 0xFFFF;
@@ -442,7 +738,6 @@ void CReal3D::StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigne
           }
           destOffset += 2048 - tileX; // next line
         }
-        uint32_t offset = (std::max)(1u, (tileY * tileX) / 2);
         texData += offset; // next tile
         texDataOffset += offset; // next tile
       }
@@ -552,7 +847,7 @@ void CReal3D::DMACopy(void)
   {
     while (dmaLength != 0)
     {
-      uint32_t  data = Bus->Read32(dmaSrc);
+      uint32_t data = Bus->Read32(dmaSrc);
       Bus->Write32(dmaDest, FLIPENDIAN32(data));
       dmaSrc += 4;
       dmaDest += 4;
@@ -571,14 +866,14 @@ void CReal3D::DMACopy(void)
   }
 }
 
-uint8_t CReal3D::ReadDMARegister8(unsigned reg)
+uint8_t CReal3D::ReadDMARegister8(unsigned reg) const
 {
   switch (reg)
   {
   case 0xC: // status
     return dmaStatus;
   case 0xE: // configuration
-    return  dmaConfig;
+    return dmaConfig;
   default:
     break;
   }
@@ -608,7 +903,7 @@ void CReal3D::WriteDMARegister8(unsigned reg, uint8_t data)
   //DebugLog("Real3D: WriteDMARegister8: reg=%X, data=%02X\n", reg, data);
 }
 
-uint32_t CReal3D::ReadDMARegister32(unsigned reg)
+uint32_t CReal3D::ReadDMARegister32(unsigned reg) const
 {
   switch (reg)
   {
@@ -644,7 +939,8 @@ void CReal3D::WriteDMARegister32(unsigned reg, uint32_t data)
   case 0x10:  // command register
     if ((data&0x20000000)) // DMA ID command
     {
-      dmaData = pciID;
+      // Games requesting PCI ID via the DMA device expect 0x16C311DB, even on step 2.x boards
+      dmaData = PCIID::Step1x;
       DebugLog("Real3D: DMA ID command issued (ATTENTION: make sure we're returning the correct value), PC=%08X, LR=%08X\n", ppc_get_pc(), ppc_get_lr());
     }
     else if ((data&0x80000000))
@@ -662,87 +958,38 @@ void CReal3D::WriteDMARegister32(unsigned reg, uint32_t data)
   //DebugLog("Real3D: WriteDMARegister32: reg=%X, data=%08X\n", reg, data);
 }
 
+void CReal3D::WriteConfigurationRegister(unsigned reg, uint32_t data)
+{
+    reg = reg & 0xF;
+
+    // reg 0 = ping pong buffer size (high culling RAM) in 32-bit words
+    // reg 4 = flags, probably overload mode etc
+    // reg 8 = combined size of the ping pong buffer and the update buffer in 32-bit words
+
+    m_configRegisters.regs[reg / 4] = data;
+    DebugLog("Real3D: Configuration register %X = %08X\n", reg, data);
+}
+
 /******************************************************************************
  Basic Emulation Functions, Registers, Memory, and Texture FIFO
 ******************************************************************************/
-
-void CReal3D::FlushTextures()
-{
-  // Upload textures (if any)
-  if (fifoIdx > 0)
-  {
-    for (uint32_t i = 0; i < fifoIdx; )
-    {
-      uint32_t size = 2+textureFIFO[i+0]/2;
-      size /= 4;
-      uint32_t header = textureFIFO[i+1]; // texture information header
-
-      // Spikeout seems to be uploading 0 length textures
-      if (0 == size)
-      {
-        DebugLog("Real3D: 0-length texture upload @ PC=%08X (%08X %08X %08X)\n", ppc_get_pc(), textureFIFO[i+0], textureFIFO[i+1], textureFIFO[i+2]);
-        break;
-      }
-
-      UploadTexture(header,(uint16_t *)&textureFIFO[i+2]);
-      DebugLog("Real3D: Texture upload completed: %X bytes (%X)\n", size*4, textureFIFO[i+0]);
-
-      i += size;
-    }
-  }
-
-  // Reset texture FIFO
-  fifoIdx = 0;
-}
-
-bool CReal3D::PollPingPong()
-{
-  if (m_config["LegacyReal3D"].ValueAsDefault<bool>(false))
-    return false;
-  return m_pingPong != m_pingPongCopy;
-}
-
-void CReal3D::DrawFrame()
-{
-  m_tilegenDrawFrame = false;
-  commandPortWritten = false;
-}
-
-void CReal3D::TilegenDrawFrame(uint32_t flags)
-{
-  if (m_config["LegacyReal3D"].ValueAsDefault<bool>(false))
-    return;
-  (void)flags;
-  m_tilegenDrawFrame = true;
-
-  if (!PollPingPong())
-  {
-    if (commandPortWritten)
-      DrawFrame();
-  }
-}
 
 void CReal3D::Flush(void)
 {
   commandPortWritten = true;
   DebugLog("Real3D 88000000 written @ PC=%08X\n", ppc_get_pc());
-
-  if (m_config["LegacyReal3D"].ValueAsDefault<bool>(false))
-  {
-    FlushTextures();
-    return;
-  }
-
-  if (!PollPingPong())
-  {
-    FlushTextures();
-    if (m_tilegenDrawFrame)
-      DrawFrame();
+  if (!PollPingPong()) {
+      FlushTextures();
+      if (m_tilegenDrawFrame) {
+          DrawFrame();
+      }
   }
 }
 
 void CReal3D::WriteTextureFIFO(uint32_t data)
 {
+  PollPingPong();
+
   if (fifoIdx >= (0x100000/4))
   {
     if (!error)
@@ -755,7 +1002,7 @@ void CReal3D::WriteTextureFIFO(uint32_t data)
 
 void CReal3D::WriteTexturePort(unsigned reg, uint32_t data)
 {
-  if (step == 0x10)
+  if (m_hwConfig.singleWordTexturePort)
   {
     uint32_t addr = data & 0xFFFFFF;
     uint32_t num_words = (2+vrom[addr+0]/2) / 4;
@@ -794,28 +1041,120 @@ void CReal3D::WriteLowCullingRAM(uint32_t addr, uint32_t data)
   cullingRAMLo[addr/4] = data;
 }
 
+// Returns true if writes go to the update buffers now: the ping-pong bit
+// flipped in this frame, and the configuration registers give an update
+// buffer area.
+bool CReal3D::UpdateBuffersActive(void) const
+{
+  return m_pingPong != m_pingPongCopy &&
+         m_configRegisters.pingPongAndUpdateMemSize > m_configRegisters.pingPongMemSize;
+}
+
+// Adds a write to an update buffer. Consecutive addresses go into the same
+// block. Returns false if the buffer has no space; then the caller must apply
+// the buffer and write directly.
+bool CReal3D::AddToUpdateBuffer(UpdateBlock *&block, uint32_t *bufferStart, uint32_t *bufferEnd, uint32_t addr, uint32_t data)
+{
+  if (block && block->lastAddr + 1 == addr)
+  {
+    // Extend the current block
+    if (&block->data[block->Count()] + 1 > bufferEnd)
+      return false;
+    block->lastAddr = addr;
+    block->data[addr - block->startAddr] = data;
+    return true;
+  }
+
+  // Start a new block
+  UpdateBlock *next = block ? block->Next() : (UpdateBlock *) bufferStart;
+  if ((uint32_t *) next + UpdateBlock::HeaderSize() + 1 > bufferEnd)
+    return false;
+  block = next;
+  block->startAddr = addr;
+  block->lastAddr = addr;
+  block->data[0] = data;
+  return true;
+}
+
 void CReal3D::WriteHighCullingRAM(uint32_t addr, uint32_t data)
 {
+  if (addr >= CULLING_RAM_HI_SIZE)
+    return;
+
+  // If ping pong has elapsed we buffer this data, else we write it normally.
+  // The buffer for high culling RAM is at the start of low culling RAM, below
+  // the buffer for polygon RAM.
+  if (UpdateBuffersActive())
+  {
+    uint32_t *start = cullingRAMLo;
+    uint32_t *end = cullingRAMLo + std::min<uint32_t>(m_configRegisters.pingPongMemSize, CULLING_RAM_LO_SIZE / 4);
+    if (AddToUpdateBuffer(m_highRamUpdateBlock, start, end, addr / 4, data))
+      return;
+
+    // The buffer is full: apply it now, so this write stays after the earlier
+    // writes
+    DebugLog("Real3D: High culling RAM update buffer is full\n");
+    SyncBufferedMem(m_highRamUpdateBlock, start, cullingRAMHi, CULLING_RAM_HI_SIZE / 4, cullingRAMHiDirty);
+    m_highRamUpdateBlock = nullptr;
+  }
+
   if (m_gpuMultiThreaded)
     MARK_DIRTY(cullingRAMHiDirty, addr);
   cullingRAMHi[addr/4] = data;
 }
 
-void CReal3D::WritePolygonRAM(uint32_t addr, uint32_t data)
+uint32_t CReal3D::ReadPolygonRAM(uint32_t addr) const
 {
-  if (m_gpuMultiThreaded)
-    MARK_DIRTY(polyRAMDirty, addr);
-  polyRAM[addr/4] = data;
+  if (addr >= m_hwConfig.installedPolygonRAMSize)
+    return 0;
+  return polyRAM[addr / 4];
 }
 
-// Internal registers accessible via JTAG port
-void CReal3D::WriteJTAGRegister(uint64_t instruction, uint64_t data)
+void CReal3D::WritePolygonRAM(uint32_t addr, uint32_t data)
 {
-  if (instruction == CJTAG::Instruction::SetReal3DRenderConfig0)
-    m_internalRenderConfig[0] = data;
-  else if (instruction == CJTAG::Instruction::SetReal3DRenderConfig1)
-    m_internalRenderConfig[1] = data;
-  UpdateRenderConfig(Render3D, m_internalRenderConfig);
+  if (addr >= m_hwConfig.installedPolygonRAMSize)
+    return;
+
+  // If ping pong has elapsed we buffer this data, else we write it normally.
+  // The buffer for polygon RAM is in low culling RAM, between the two sizes
+  // that the configuration registers give.
+  if (UpdateBuffersActive())
+  {
+    uint32_t *start = cullingRAMLo + std::min<uint32_t>(m_configRegisters.pingPongMemSize, CULLING_RAM_LO_SIZE / 4);
+    uint32_t *end = cullingRAMLo + std::min<uint32_t>(m_configRegisters.pingPongAndUpdateMemSize, CULLING_RAM_LO_SIZE / 4);
+    if (AddToUpdateBuffer(m_polyUpdateBlock, start, end, addr / 4, data))
+      return;
+
+    // The buffer is full: apply it now, so this write stays after the earlier
+    // writes
+    DebugLog("Real3D: Polygon RAM update buffer is full\n");
+    SyncBufferedMem(m_polyUpdateBlock, start, polyRAM, m_hwConfig.polygonRAMSize / 4, polyRAMDirty);
+    m_polyUpdateBlock = nullptr;
+  }
+
+  if (m_gpuMultiThreaded)
+    MARK_DIRTY(polyRAMDirty, addr);
+  polyRAM[addr / 4] = data;
+}
+
+void CReal3D::WriteJTAGModeword(CASIC::Name device, uint32_t data)
+{
+    if (device == CASIC::Name::Dummy)
+        return;
+
+    m_modeword[static_cast<int>(device)] = data;
+
+    switch (device)
+    {
+    case CASIC::Name::Mercury:
+        // block culling (disables rendering for 3d h/w)
+        break;
+    case CASIC::Name::Mars:
+        Render3D->SetSunClamp((data & 0x40000) == 0);
+        break;
+    default:
+        break;
+    }
 }
 
 // Registers correspond to the Stat_Pckt in the Real3d sdk
@@ -857,32 +1196,15 @@ uint32_t CReal3D::ReadRegister(unsigned reg)
   DebugLog("Real3D: Read reg %X\n", reg);
   if (reg == 0)
   {
-    if (m_useLegacyStatusBit || m_config["LegacyReal3D"].ValueAsDefault<bool>(false))
-    {
-      uint32_t ping_pong;
-      if (m_evenFrame) {
-        ping_pong = (ppc_total_cycles() >= statusChange ? 0x0 : 0x02000000);
-      } else {
-        ping_pong = (ppc_total_cycles() >= statusChange ? 0x02000000 : 0x0);
-      }
-      return 0xfdffffff | ping_pong;
-    }
-
-    uint32_t ping_pong = (m_pingPong ? 0x02000000 : 0x0);
-    return 0xfdffffff | ping_pong;
+	  uint32_t ping_pong = (m_pingPong ? 0x02000000 : 0x0);
+	  return 0xfdffffff | ping_pong;
   }
 
   else if (reg >= 20 && reg<=32) {	// line of sight registers
 
 	int index = (reg - 20) / 4;
 	float val = Render3D->GetLosValue(index);
-
-	if (val != 0.f) {
-		//val = 1.0f / val;		// test program indicate z values are 1 over
-		return 0xffffffff;		// infinity
-	}
-
-	return *(uint32_t*)(&val);
+	return Util::FloatAsUint32(val);
   }
 
   return 0xffffffff;
@@ -890,7 +1212,7 @@ uint32_t CReal3D::ReadRegister(unsigned reg)
 
 // TODO: This returns data in the way that the PowerPC bus expects. Other functions in CReal3D should
 // return data this way.
-uint32_t CReal3D::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset)
+uint32_t CReal3D::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset) const
 {
   uint32_t  d;
 
@@ -904,7 +1226,7 @@ uint32_t CReal3D::ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bit
   switch (reg)
   {
   case 0x00:  // Device ID and Vendor ID
-    d = FLIPENDIAN32(pciID);
+    d = FLIPENDIAN32(m_hwConfig.pciID);
     switch (bits)
     {
     case 8:
@@ -938,12 +1260,9 @@ void CReal3D::Reset(void)
   error = false;
 
   m_pingPong = 0;
-  m_pingPongCopy = 0;
-  statusChange = 0;
-  m_evenFrame = false;
-  m_useLegacyStatusBit = false;
   commandPortWritten = false;
   m_tilegenDrawFrame = false;
+  m_blockCullingRO = false;
 
   queuedUploadTextures.clear();
   queuedUploadTexturesRO.clear();
@@ -959,7 +1278,14 @@ void CReal3D::Reset(void)
   dmaStatus = 0;
   dmaConfig = 0;
 
-  unsigned memSize = (m_gpuMultiThreaded ? MEMORY_POOL_SIZE : MEM_POOL_SIZE_RW);
+  for (auto& r : m_configRegisters.regs) {
+      r = 0;
+  }
+
+  m_polyUpdateBlock = nullptr;
+  m_highRamUpdateBlock = nullptr;
+
+  unsigned memSize = (m_gpuMultiThreaded ? m_layout.total : m_layout.sizeRW);
   memset(memoryPool, 0, memSize);
   memset(m_vromTextureFIFO, 0, sizeof(m_vromTextureFIFO));
   memset(m_internalRenderConfig, 0, sizeof(m_internalRenderConfig));
@@ -976,81 +1302,64 @@ void CReal3D::AttachRenderer(IRender3D *Render3DPtr)
 {
   Render3D = Render3DPtr;
 
-  // If mult-threaded, attach read-only snapshots to renderer instead of real ones
+  // If mult-threaded, attach read-only snapshots to renderer instead of real
+  // ones. If polygon RAM replaces VROM, the renderer must read the snapshot
+  // of polygon RAM through both pointers.
   if (m_gpuMultiThreaded)
-    Render3D->AttachMemory(cullingRAMLoRO, cullingRAMHiRO, polyRAMRO, vrom, textureRAMRO);
+    Render3D->AttachMemory(cullingRAMLoRO, cullingRAMHiRO, polyRAMRO, m_hwConfig.vromIsPolygonRAM ? polyRAMRO : vrom, textureRAMRO);
   else
     Render3D->AttachMemory(cullingRAMLo, cullingRAMHi, polyRAM, vrom, textureRAM);
 
-  Render3D->SetStepping(step);
+  Render3D->SetVROMIsPolygonRAM(m_hwConfig.vromIsPolygonRAM);
 
   DebugLog("Real3D attached a Render3D object\n");
 }
 
-uint32_t CReal3D::GetASICIDCode(ASIC asic) const
+Real3DConfig Real3DConfig::Model3(Game::Stepping stepping)
 {
-  auto it = m_asicID.find(asic);
-  return it == m_asicID.end() ? 0 : it->second;
+  Real3DConfig config;
+  bool step2x = stepping == Game::Stepping::MODEL3_2_0 || stepping == Game::Stepping::MODEL3_2_1;
+  config.pciID = step2x ? CReal3D::PCIID::Step2x : CReal3D::PCIID::Step1x;
+  config.singleWordTexturePort = stepping == Game::Stepping::MODEL3_1_0;
+  return config;
 }
 
-void CReal3D::SetStepping(int stepping, uint32_t pciIDValue)
+Real3DConfig Real3DConfig::Pro1000(uint32_t installedPolygonRAMSize)
 {
-  step = stepping;
-  if ((step!=0x10) && (step!=0x15) && (step!=0x20) && (step!=0x21))
-  {
-    DebugLog("Real3D: Unrecognized stepping: %d.%d\n", (step>>4)&0xF, step&0xF);
-    step = 0x10;
-  }
-
-  // Set PCI ID
-  pciID = pciIDValue;
-
-  // Pass to renderer
-  if (Render3D != NULL)
-    Render3D->SetStepping(step);
-
-  // Set ASIC ID codes
-  m_asicID.clear();
-  if (step == 0x10)
-  {
-    m_asicID = decltype(m_asicID)
-    {
-      { ASIC::Mercury,  0x216c3057 },
-      { ASIC::Venus,    0x116c4057 },
-      { ASIC::Earth,    0x216c5057 },
-      { ASIC::Mars,     0x116c6057 },
-      { ASIC::Jupiter,  0x116c7057 }
-    };
-  }
-  else if (step == 0x15)
-  {
-    m_asicID = decltype(m_asicID)
-    {
-      { ASIC::Mercury,  0x316c3057 },
-      { ASIC::Venus,    0x216c4057 },
-      { ASIC::Earth,    0x316c5057 },
-      { ASIC::Mars,     0x216c6057 },
-      { ASIC::Jupiter,  0x316c7057 }
-    };
-  }
-  else if (step >= 0x20)
-  {
-    m_asicID = decltype(m_asicID)
-    {
-      { ASIC::Mercury,  0x416c3057 },
-      { ASIC::Venus,    0x316c4057 }, // skichamp @ pc=0xa89f4, this value causes 'NO DAUGHTER BOARD' message
-      { ASIC::Earth,    0x416c5057 },
-      { ASIC::Mars,     0x316c6057 },
-      { ASIC::Jupiter,  0x416c7057 }
-    };
-  }
-
-  DebugLog("Real3D set to Step %d.%d\n", (step>>4)&0xF, step&0xF);
+  Real3DConfig config;
+  config.polygonRAMSize = 0x4000000;
+  config.installedPolygonRAMSize = installedPolygonRAMSize;
+  config.vromIsPolygonRAM = true;
+  config.pciID = CReal3D::PCIID::Step1x;
+  config.singleWordTexturePort = true;
+  return config;
 }
 
-Result CReal3D::Init(const uint8_t *vromPtr, IBus *BusObjectPtr, CIRQ *IRQObjectPtr, unsigned dmaIRQBit)
+Result CReal3D::Init(const uint8_t *vromPtr, IBus *BusObjectPtr, IIRQController *IRQObjectPtr, uint16_t dmaIRQBit, const Real3DConfig &hwConfig)
 {
-  uint32_t memSize = (m_gpuMultiThreaded ? MEMORY_POOL_SIZE : MEM_POOL_SIZE_RW);
+  // Memory layout for the hardware configuration
+  m_hwConfig = hwConfig;
+  m_hwConfig.installedPolygonRAMSize = std::min(m_hwConfig.installedPolygonRAMSize, m_hwConfig.polygonRAMSize);
+  MemoryLayout &l = m_layout;
+  l.cullingRAMLo = 0;
+  l.cullingRAMHi = l.cullingRAMLo + CULLING_RAM_LO_SIZE;
+  l.polyRAM = l.cullingRAMHi + CULLING_RAM_HI_SIZE;
+  l.textureRAM = l.polyRAM + m_hwConfig.polygonRAMSize;
+  l.textureFIFO = l.textureRAM + TEXTURE_RAM_SIZE;
+  l.sizeRW = l.textureFIFO + TEXTURE_FIFO_SIZE;
+  l.cullingRAMLoRO = l.sizeRW;
+  l.cullingRAMHiRO = l.cullingRAMLoRO + CULLING_RAM_LO_SIZE;
+  l.polyRAMRO = l.cullingRAMHiRO + CULLING_RAM_HI_SIZE;
+  l.textureRAMRO = l.polyRAMRO + m_hwConfig.polygonRAMSize;
+  l.sizeRO = CULLING_RAM_LO_SIZE + CULLING_RAM_HI_SIZE + m_hwConfig.polygonRAMSize + TEXTURE_RAM_SIZE;
+  l.cullingRAMLoDirty = l.sizeRW + l.sizeRO;
+  l.cullingRAMHiDirty = l.cullingRAMLoDirty + DIRTY_SIZE(CULLING_RAM_LO_SIZE);
+  l.polyRAMDirty = l.cullingRAMHiDirty + DIRTY_SIZE(CULLING_RAM_HI_SIZE);
+  l.textureRAMDirty = l.polyRAMDirty + DIRTY_SIZE(m_hwConfig.polygonRAMSize);
+  l.sizeDirty = DIRTY_SIZE(l.sizeRO);
+  l.total = l.sizeRW + l.sizeRO + l.sizeDirty;
+
+  uint32_t memSize = (m_gpuMultiThreaded ? l.total : l.sizeRW);
   float  memSizeMB = (float)memSize/(float)0x100000;
 
   // IRQ and bus objects
@@ -1063,28 +1372,36 @@ Result CReal3D::Init(const uint8_t *vromPtr, IBus *BusObjectPtr, CIRQ *IRQObject
   if (NULL == memoryPool)
     return ErrorLog("Insufficient memory for Real3D object (needs %1.1f MB).", memSizeMB);
 
+  // new[] does not initialize the memory. Clear it, or the renderer reads
+  // random values where a program writes no data.
+  memset(memoryPool, 0, memSize);
+
   // Set up main pointers
-  cullingRAMLo = (uint32_t *) &memoryPool[OFFSET_8C];
-  cullingRAMHi = (uint32_t *) &memoryPool[OFFSET_8E];
-  polyRAM = (uint32_t *) &memoryPool[OFFSET_98];
-  textureRAM = (uint16_t *) &memoryPool[OFFSET_TEXRAM];
-  textureFIFO = (uint32_t *) &memoryPool[OFFSET_TEXFIFO];
+  cullingRAMLo = (uint32_t *) &memoryPool[l.cullingRAMLo];
+  cullingRAMHi = (uint32_t *) &memoryPool[l.cullingRAMHi];
+  polyRAM = (uint32_t *) &memoryPool[l.polyRAM];
+  textureRAM = (uint16_t *) &memoryPool[l.textureRAM];
+  textureFIFO = (uint32_t *) &memoryPool[l.textureFIFO];
 
   // If multi-threaded, set up pointers for read-only snapshots and dirty page arrays too
   if (m_gpuMultiThreaded)
   {
-    cullingRAMLoRO = (uint32_t *) &memoryPool[OFFSET_8C_RO];
-    cullingRAMHiRO = (uint32_t *) &memoryPool[OFFSET_8E_RO];
-    polyRAMRO = (uint32_t *) &memoryPool[OFFSET_98_RO];
-    textureRAMRO = (uint16_t *) &memoryPool[OFFSET_TEXRAM_RO];
-    cullingRAMLoDirty = (uint8_t *) &memoryPool[OFFSET_8C_DIRTY];
-    cullingRAMHiDirty = (uint8_t *) &memoryPool[OFFSET_8E_DIRTY];
-    polyRAMDirty = (uint8_t *) &memoryPool[OFFSET_98_DIRTY];
-    textureRAMDirty = (uint8_t *) &memoryPool[OFFSET_TEXRAM_DIRTY];
+    cullingRAMLoRO = (uint32_t *) &memoryPool[l.cullingRAMLoRO];
+    cullingRAMHiRO = (uint32_t *) &memoryPool[l.cullingRAMHiRO];
+    polyRAMRO = (uint32_t *) &memoryPool[l.polyRAMRO];
+    textureRAMRO = (uint16_t *) &memoryPool[l.textureRAMRO];
+    cullingRAMLoDirty = (uint8_t *) &memoryPool[l.cullingRAMLoDirty];
+    cullingRAMHiDirty = (uint8_t *) &memoryPool[l.cullingRAMHiDirty];
+    polyRAMDirty = (uint8_t *) &memoryPool[l.polyRAMDirty];
+    textureRAMDirty = (uint8_t *) &memoryPool[l.textureRAMDirty];
   }
 
-  // VROM pointer passed to us
-  vrom = (uint32_t *) vromPtr;
+  // VROM pointer passed to us. If there is no VROM, polygon RAM replaces it:
+  // the same word address gives the same location through either pointer.
+  if (m_hwConfig.vromIsPolygonRAM)
+    vrom = polyRAM;
+  else
+    vrom = (uint32_t *) vromPtr;
 
   DebugLog("Initialized Real3D (allocated %1.1f MB)\n", memSizeMB);
   return Result::OKAY;
@@ -1092,30 +1409,10 @@ Result CReal3D::Init(const uint8_t *vromPtr, IBus *BusObjectPtr, CIRQ *IRQObject
 
 CReal3D::CReal3D(const Util::Config::Node &config)
   : m_config(config),
-    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>())
+    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>()),
+    m_layout{},
+    m_configRegisters{}
 {
-  Render3D = NULL;
-  memoryPool = NULL;
-  cullingRAMLo = NULL;
-  cullingRAMHi = NULL;
-  polyRAM = NULL;
-  textureRAM = NULL;
-  textureFIFO = NULL;
-  vrom = NULL;
-  error = false;
-  fifoIdx = 0;
-  commandPortWritten = false;
-  m_tilegenDrawFrame = false;
-  m_pingPong = 0;
-  m_pingPongCopy = 0;
-  statusChange = 0;
-  m_evenFrame = false;
-  m_useLegacyStatusBit = false;
-  m_vromTextureFIFO[0] = 0;
-  m_vromTextureFIFO[1] = 0;
-  m_vromTextureFIFOIdx = 0;
-  m_internalRenderConfig[0] = 0;
-  m_internalRenderConfig[1] = 0;
   DebugLog("Built Real3D\n");
 }
 
@@ -1150,7 +1447,7 @@ CReal3D::~CReal3D(void)
   fp = fopen("98000000", "wb");
   if (NULL != fp)
   {
-    fwrite(polyRAM, sizeof(uint8_t), 0x400000, fp);
+    fwrite(polyRAM, sizeof(uint8_t), m_hwConfig.polygonRAMSize, fp);
     fclose(fp);
     printf("dumped %s\n", "98000000");
   }
@@ -1198,17 +1495,18 @@ CReal3D::~CReal3D(void)
     printf("Wrote textures as L4 (channel 3) to 'textures_l4_3.bmp'\n");
   }
 
-  Render3D = NULL;
-  if (memoryPool != NULL)
-  {
-    delete [] memoryPool;
-    memoryPool = NULL;
-  }
-  cullingRAMLo = NULL;
-  cullingRAMHi = NULL;
-  polyRAM = NULL;
-  textureRAM = NULL;
-  textureFIFO = NULL;
-  vrom = NULL;
+  Render3D = nullptr;
+  delete [] memoryPool;
+  memoryPool = nullptr;
+  cullingRAMLo = nullptr;
+  cullingRAMHi = nullptr;
+  polyRAM = nullptr;
+  textureRAM = nullptr;
+  textureFIFO = nullptr;
+  vrom = nullptr;
+
+  m_polyUpdateBlock = nullptr;
+  m_highRamUpdateBlock = nullptr;
+
   DebugLog("Destroyed Real3D\n");
 }

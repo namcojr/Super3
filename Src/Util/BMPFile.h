@@ -1,3 +1,24 @@
+/**
+ ** Supermodel
+ ** A Sega Model 3 Arcade Emulator.
+ ** Copyright 2003-2026 The Supermodel Team
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef INCLUDED_BMPFILE_HPP
 #define INCLUDED_BMPFILE_HPP
 
@@ -109,7 +130,7 @@ namespace Util
 
   struct RGBA8
   {
-    static const unsigned bytes_per_pixel = 4;
+    static constexpr unsigned bytes_per_pixel = 4;
     static inline uint8_t GetRed(const uint8_t *pixel)
     {
       return pixel[0];
@@ -132,7 +153,7 @@ namespace Util
   template <bool EnableContour>
   struct T1RGB5
   {
-    static const unsigned bytes_per_pixel = 2;
+    static constexpr unsigned bytes_per_pixel = 2;
     static inline uint8_t GetRed(const uint8_t *pixel)
     {
       return uint8_t((255.0f / 31.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 10) & 0x1f));
@@ -165,7 +186,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 1: xxxx xxxx AAAA LLLL
   struct A4L4Low
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xf));
@@ -187,7 +208,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 2: xxxx xxxx LLLL AAAA
   struct L4A4Low
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 4) & 0xf));
@@ -209,7 +230,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 3: AAAA LLLL xxxx xxxx
   struct A4L4High
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xf));
@@ -231,7 +252,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 4: LLLL AAAA xxxx xxxx
   struct L4A4High
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> 12) & 0xf));
@@ -253,7 +274,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 5: xxxx xxxx LLLL LLLL, where L=0xff is transparent and L!=0xff is opaque
   struct L8Low
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 0) & 0xff);
@@ -276,7 +297,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 6: LLLL LLLL xxxx xxxx, where L=0xff is transparent and L!=0xff is opaque
   struct L8High
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((*reinterpret_cast<const uint16_t*>(pixel) >> 8) & 0xff);
@@ -299,7 +320,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   // Texture format 7: RRRR GGGG BBBB AAAA
   struct RGBA4
   {
-    static const unsigned bytes_per_pixel = 2;
+    static constexpr unsigned bytes_per_pixel = 2;
     static inline uint8_t GetRed(const uint8_t *pixel)
     {
       return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t *>(pixel) >> 12) & 0xf));
@@ -325,7 +346,7 @@ using T1RGB5ContourIgnored = T1RGB5<false>;
   template <int Channel>
   struct L4
   {
-      static const unsigned bytes_per_pixel = 2;
+      static constexpr unsigned bytes_per_pixel = 2;
       static inline uint8_t GetRed(const uint8_t* pixel)
       {
           return uint8_t((255.0f / 15.0f) * float((*reinterpret_cast<const uint16_t*>(pixel) >> (Channel * 4)) & 0xf));

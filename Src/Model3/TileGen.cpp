@@ -48,36 +48,20 @@
  * - For consistency, the registers should probably be byte reversed (this is a
  *   little endian device), forcing the Model3 Read32/Write32 handlers to
  *   manually reverse the data. This keeps with the convention for VRAM.
+ *   Need to finish ripping out code that no longer does anything. Removed a lot but there's still more.
  */
 
 #include "TileGen.h"
 
 #include <cstring>
+#include <algorithm>
 #include "Supermodel.h"
-
-// Macros that divide memory regions into pages and mark them as dirty when they are written to
-#define PAGE_WIDTH 10
-#define PAGE_SIZE (1<<PAGE_WIDTH)
-#define DIRTY_SIZE(arraySize) (1+(arraySize-1)/(8*PAGE_SIZE))
-#define MARK_DIRTY(dirtyArray, addr) dirtyArray[addr>>(PAGE_WIDTH+3)] |= 1<<((addr>>PAGE_WIDTH)&7)
 
 // Offsets of memory regions within TileGen memory pool
 #define OFFSET_VRAM         0x000000	// VRAM and palette data
-#define OFFSET_PAL_A        0x120000	// computed A/A' palette
-#define OFFSET_PAL_B		0x140000	// computed B/B' palette 
-#define MEM_POOL_SIZE_RW    (0x120000+0x040000)
+#define MEM_POOL_SIZE_RW    (0x120000)
 
-#define OFFSET_VRAM_RO      0x160000   // [read-only snapshot]
-#define OFFSET_PAL_RO_A     0x280000   // [read-only snapshot]
-#define OFFSET_PAL_RO_B		0x2A0000
-#define MEM_POOL_SIZE_RO    (0x120000+0x040000)
-
-#define OFFSET_VRAM_DIRTY   0x2C0000
-#define OFFSET_PAL_A_DIRTY  (OFFSET_VRAM_DIRTY+DIRTY_SIZE(0x120000))
-#define OFFSET_PAL_B_DIRTY	(OFFSET_PAL_A_DIRTY+DIRTY_SIZE(0x20000))
-#define MEM_POOL_SIZE_DIRTY (DIRTY_SIZE(0x120000)+2*DIRTY_SIZE(0x20000))	// VRAM + 2 palette dirty buffers
-
-#define MEMORY_POOL_SIZE	(MEM_POOL_SIZE_RW+MEM_POOL_SIZE_RO+MEM_POOL_SIZE_DIRTY)
+#define MEMORY_POOL_SIZE	(MEM_POOL_SIZE_RW)
 
 
 /******************************************************************************
@@ -87,8 +71,8 @@
 void CTileGen::SaveState(CBlockFile *SaveState)
 {
 	SaveState->NewBlock("Tile Generator", __FILE__);
-	SaveState->Write(vram, 0x120000); // Don't write out palette, read-only snapshots or dirty page arrays, just VRAM
-	SaveState->Write(regs, sizeof(regs));
+	SaveState->Write(m_vram, 0x120000); // Don't write out palette, read-only snapshots or dirty page arrays, just VRAM
+	SaveState->Write(m_regs, sizeof(m_regs));
 }
 
 void CTileGen::LoadState(CBlockFile *SaveState)
@@ -103,18 +87,29 @@ void CTileGen::LoadState(CBlockFile *SaveState)
 	for (int i = 0; i < 0x120000; i += 4)
 	{
 		UINT32 data;
-	
 		SaveState->Read(&data, sizeof(data));
 		WriteRAM32(i, data);
 	}	
-	SaveState->Read(regs, sizeof(regs));
-	
-	// Because regs were read after palette, must recompute
-	RecomputePalettes();
-	
-	// If multi-threaded, update read-only snapshots too
-	if (m_gpuMultiThreaded)
-		UpdateSnapshots(true);
+	SaveState->Read(m_regs, sizeof(m_regs));
+	m_busFree = 0;
+	m_busWritesDone = 0;
+
+	m_colourOffsetRegs[0].Update(m_regs[0x40 / 4]);
+	RecomputePalettes(0);	// layer 0 & 1
+	m_colourOffsetRegs[1].Update(m_regs[0x44 / 4]);
+	RecomputePalettes(1);	// layer 2 & 3
+
+	// clear surfaces
+	for (auto& s : m_drawSurface) {
+		s->Clear();
+	}
+
+	// draw buffers
+	for (int i = 0; i < 384; i++) {
+		DrawLine(i);
+	}
+
+	SyncSnapshots();
 }
 
 
@@ -136,112 +131,32 @@ void CTileGen::BeginVBlank(void)
 	printf("6C: %08X\n", regs[0x6C/4]);
 	printf("\n");
 */
+
+// clear surfaces
+	for (auto& s : m_drawSurface) {
+		s->Clear();
+	}
 }
 
 void CTileGen::EndVBlank(void)
 {
-	//
-}
-
-void CTileGen::RecomputePalettes(void)
-{
-	// Writing the colors forces palettes to be computed
-	if (m_gpuMultiThreaded)
-	{
-		for (unsigned colorAddr = 0; colorAddr < 32768*4; colorAddr += 4 )
-		{
-			MARK_DIRTY(palDirty[0], colorAddr);
-			MARK_DIRTY(palDirty[1], colorAddr);
-			WritePalette(colorAddr/4, *(UINT32 *) &vram[0x100000+colorAddr]);
-		}
-	}
-	else
-	{
-		for (unsigned colorAddr = 0; colorAddr < 32768*4; colorAddr += 4 )
-			WritePalette(colorAddr/4, *(UINT32 *) &vram[0x100000+colorAddr]);
-	}
 }
 
 UINT32 CTileGen::SyncSnapshots(void)
 {
-	// Good time to recompute the palettes
-	if (recomputePalettes)
-	{
-		RecomputePalettes();
-		recomputePalettes = false;
-	}
-	
-	if (!m_gpuMultiThreaded)
-		return 0;
-	
-	// Update read-only snapshots
-	return UpdateSnapshots(false);
-}
 
-UINT32 CTileGen::UpdateSnapshot(bool copyWhole, UINT8 *src, UINT8 *dst, unsigned size, UINT8 *dirty)
-{
-	unsigned dirtySize = DIRTY_SIZE(size);
-	if (copyWhole)
-	{
-		// If updating whole region, then just copy all data in one go
-		memcpy(dst, src, size);
-		memset(dirty, 0, dirtySize);
-		return size;
+	// swap buffers
+	for (int i = 0; i < 2; i++) {
+		std::swap(m_drawSurface[i], m_drawSurfaceRO[i]);
 	}
-	else
-	{
-		// Otherwise, loop through dirty pages array to find out what needs to be updated and copy only those parts
-		UINT32 copied = 0;
-		UINT8 *pSrc = src;
-		UINT8 *pDst = dst;
-		for (unsigned i = 0; i < dirtySize; i++)
-		{
-			UINT8 d = dirty[i];
-			if (d)
-			{
-				for (unsigned j = 0; j < 8; j++)
-				{
-					if (d&1)
-					{
-						// If not at very end of region, then copy an extra 4 bytes to allow for a possible 32-bit overlap
-						UINT32 toCopy = (i < dirtySize - 1 || j < 7 ? PAGE_SIZE + 4 : PAGE_SIZE);
-						memcpy(pDst, pSrc, toCopy);
-						copied += toCopy;
-					}
-					d >>= 1;
-					pSrc += PAGE_SIZE;	
-					pDst += PAGE_SIZE;
-				}
-				dirty[i] = 0;
-			}
-			else
-			{
-				pSrc += 8 * PAGE_SIZE;	
-				pDst += 8 * PAGE_SIZE;
-			}
-		}
-		return copied;
-	}
-}
 
-UINT32 CTileGen::UpdateSnapshots(bool copyWhole)
-{
-	// Update all memory region snapshots
-	UINT32 palACopied  = UpdateSnapshot(copyWhole, (UINT8*)pal[0],  (UINT8*)palRO[0],  0x020000, palDirty[0]);
-	UINT32 palBCopied  = UpdateSnapshot(copyWhole, (UINT8*)pal[1],  (UINT8*)palRO[1],  0x020000, palDirty[1]);
-	UINT32 vramCopied = UpdateSnapshot(copyWhole, (UINT8*)vram, (UINT8*)vramRO, 0x120000, vramDirty);
-	memcpy(regsRO, regs, sizeof(regs)); // Always copy whole of regs buffer
-	//printf("TileGen copied - palA:%4uK, palB:%4uK, vram:%4uK, regs:%uK\n", palACopied / 1024, palBCopied / 1024, vramCopied / 1024, sizeof(regs) / 1024);
-	return palACopied + palBCopied + vramCopied + sizeof(regs);
+	Render2D->AttachDrawBuffers(m_drawSurfaceRO[0], m_drawSurfaceRO[1]);
+	
+	return UINT32(0);
 }
 
 void CTileGen::BeginFrame(void)
 {
-	// NOTE: Render2D->WriteVRAM(addr, data) is no longer being called for RAM addresses that are written
-	// to and instead this class relies upon the fact that Render2D currently marks everything as dirty
-	// with every frame.  If this were to change in the future then code to handle marking the correct
-	// parts of the renderer as dirty would need to be added here.
-	
 	Render2D->BeginFrame();
 }
 
@@ -266,42 +181,130 @@ void CTileGen::EndFrame(void)
 }
 
 /******************************************************************************
+ Tile and Palette RAM Bus Timing
+******************************************************************************/
+
+/*
+ * Timing values
+ * -------------
+ *
+ * Everything is measured in VRAM clocks and stored in 1/16 PowerPC cycles, so that it works out exactly (or very
+ * nearly) for any PowerPC clock.
+ *
+ *   1 VRAM clock = 1 / 32 MHz = 31.25 ns
+ *   1 pixel      = 2 VRAM clocks (16 MHz pixel clock) = 62.5 ns
+ *   1 line       = 656 pixels (512 generated, of which 496 are visible, plus 144 with no fetching) = 41 us
+ *
+ * The values, and what they are in PowerPC cycles at 100 MHz (Step 1.5) for reference:
+ *
+ *   Write busy time    2.5 pixels =  5 VRAM clocks = 156 ns  (~16 PowerPC cycles)
+ *     How long a posted write keeps the tile generator busy. Back-to-back stores (e.g. clearing the name tables)
+ *     go at this rate. Measured: Scud Race Plus's Test menu clears 8,311 words at the start of vertical blanking
+ *     and still shows its top lines of text on real hardware, which needs about 3.2 pixels or less per write.
+ *
+ *   Write complete     6.3 pixels = 12.6 VRAM clocks = 394 ns  (~39 PowerPC cycles)
+ *     How long until a write has actually landed in tile RAM or palette RAM. A read over the bus has to wait for
+ *     this, so loops that copy from CROM (every upload in Scud Race) are limited to one write per 6.3 pixels,
+ *     about 104 writes per line during vertical blanking. Measured: the corrupted frames on Scud Race Plus's car
+ *     select and "decided like this" screens match real hardware at this rate.
+ *
+ *   Fetch slot         16 pixels = 32 VRAM clocks = 1 us  (~100 PowerPC cycles)
+ *     During the 512 generated pixels of an active line the tile generator uses tile RAM to fetch tiles and only
+ *     leaves one 4-clock slot per tile pair (16 pixels) for the PowerPC: 32 slots per line. With ~23 more writes
+ *     in the 144 pixels without fetching, copies from CROM average ~55 tile RAM writes per active line. Palette
+ *     RAM is not affected by the fetch.
+ */
+void CTileGen::SetCPUClock(unsigned hz)
+{
+	m_busClock = (hz + 1000000) / 2000000;			// one VRAM clock in 1/16 PowerPC cycles: 16 * hz / 32 MHz
+	if (m_busClock == 0)
+		m_busClock = 1;
+	m_busIssue = 5 * m_busClock;					// write busy time: 2.5 pixels = 5 VRAM clocks
+	m_busComplete = (63 * m_busClock + 2) / 5;		// write complete: 6.3 pixels = 12.6 VRAM clocks
+}
+
+void CTileGen::BeginBusLine(UINT64 cpuCycle)
+{
+	m_busLineStart = cpuCycle * 16;
+	m_busFetching = true;
+}
+
+void CTileGen::BeginBusBlanking(void)
+{
+	m_busFetching = false;
+}
+
+int CTileGen::BusAccessCycles(UINT64 cpuCycle, bool write, bool tileRAM)
+{
+	const UINT64 clk = m_busClock;
+	const UINT64 now = cpuCycle * 16;
+	UINT64 start = std::max(now, m_busFree);	// after the previous access
+
+	bool fetchSlot = false;
+	if (tileRAM && m_busFetching)
+	{
+		// Each active line the tile generator fetches 32 tile pairs (512 pixels, of which 496 are visible) at 32
+		// clocks each, and the PowerPC gets the last 4 clocks of each pair. The rest of the line (144 pixels) is
+		// free.
+		const UINT64 pair = 32 * clk;							// one tile pair: 16 pixels = 32 VRAM clocks
+		const UINT64 fetchEnd = m_busLineStart + 32 * pair;		// 32 tile pairs: 512 pixels
+		if (start < fetchEnd)
+		{
+			const UINT64 firstSlot = m_busLineStart + 28 * clk;	// the PowerPC slot is the last 4 clocks of each pair
+			UINT64 slot = start <= firstSlot ? firstSlot : firstSlot + ((start - firstSlot + pair - 1) / pair) * pair;
+			start = std::min(slot, fetchEnd);
+			fetchSlot = start < fetchEnd;
+		}
+	}
+
+	// Writes are posted: the chip is only busy briefly (or for the 4-clock fetch slot), but the write completes
+	// later. Over an active line, copies from CROM average ~55 tile RAM writes: 32 slots during the fetch plus ~23
+	// in the remaining 144 pixels.
+	m_busFree = start + (fetchSlot ? 4 * clk : m_busIssue);
+	const UINT64 complete = start + m_busComplete;
+	m_busWritesDone = std::max(m_busWritesDone, complete);
+
+	// A write only waits until the chip takes it. A read waits for its data and for earlier writes to complete.
+	const UINT64 waitUntil = write ? start : std::max(complete, m_busWritesDone);
+	return waitUntil > now ? (int)((waitUntil - now + 15) / 16) : 0;
+}
+
+int CTileGen::BusReadCycles(UINT64 cpuCycle)
+{
+	// A read over the bus cannot overtake posted tile generator writes, so it waits for the last one to complete
+	const UINT64 now = cpuCycle * 16;
+	return m_busWritesDone > now ? (int)((m_busWritesDone - now + 15) / 16) : 0;
+}
+
+
+/******************************************************************************
  Emulation Functions
 ******************************************************************************/
 
-UINT32 CTileGen::ReadRAM32(unsigned addr)
+UINT32 CTileGen::ReadRAM32(unsigned addr) const
 {
-	return *(UINT32 *) &vram[addr];
+	return *(UINT32 *) &m_vram[addr];
 }
 
 void CTileGen::WriteRAM32(unsigned addr, UINT32 data)
 {
-	if (m_gpuMultiThreaded)
-		MARK_DIRTY(vramDirty, addr);
-	*(UINT32 *) &vram[addr] = data;
-		
-	// Update palette if required
-	if (addr >= 0x100000)
-    {
+	*(UINT32 *) &m_vram[addr] = data;
+
+	if (addr >= 0x100000) {
+
 		addr -= 0x100000;
-		unsigned color = addr/4;	// color index
-		
-		// Same address in both palettes must be marked dirty
-		if (m_gpuMultiThreaded)
-		{
-			MARK_DIRTY(palDirty[0], addr);
-			MARK_DIRTY(palDirty[1], addr);
-		}
-			
+		unsigned color = addr / 4;	// color index
+
 		// Both palettes will be modified simultaneously
-        WritePalette(color, data);
-    }
+		WritePalette(0, color, data);
+		WritePalette(1, color, data);
+	}
 }
 
 //TODO: 8- and 16-bit handlers have not been thoroughly tested
-uint8_t CTileGen::ReadRAM8(unsigned addr)
+uint8_t CTileGen::ReadRAM8(unsigned addr) const
 {
-  return vram[addr];
+  return m_vram[addr];
 }
 
 void CTileGen::WriteRAM8(unsigned addr, uint8_t data)
@@ -315,9 +318,9 @@ void CTileGen::WriteRAM8(unsigned addr, uint8_t data)
 }
 
 // Star Wars Trilogy uses this
-uint16_t CTileGen::ReadRAM16(unsigned addr)
+uint16_t CTileGen::ReadRAM16(unsigned addr) const
 {
-  return *((uint16_t *) &vram[addr]);
+  return *((uint16_t *) &m_vram[addr]);
 }
 
 void CTileGen::WriteRAM16(unsigned addr, uint16_t data)
@@ -330,91 +333,22 @@ void CTileGen::WriteRAM16(unsigned addr, uint16_t data)
   WriteRAM32(addr & ~1, tmp);
 }
 
-void CTileGen::InitPalette(void)
-{
-	for (int i = 0; i < 0x20000/4; i++)
-	{
-		WritePalette(i, *(UINT32 *) &vram[0x100000 + i*4]);
-		if (m_gpuMultiThreaded)
-		{
-			palRO[0][i] = pal[0][i];
-			palRO[1][i] = pal[1][i];
-		}
-	}
-}
-
-static inline UINT32 AddColorOffset(UINT8 r, UINT8 g, UINT8 b, UINT8 a, UINT32 offsetReg)
-{
-	INT32	ir, ig, ib;
-	
-	/*
-	 * Color offsets are signed but I'm not sure whether or not their range is 
-	 * merely [-128,+127], which would mean adding to a 0 component would not 
-	 * result full intensity (only +127 at most). Alternatively, the signed 
-	 * value might have to be multiplied by 2. That is assumed here. In either 
-	 * case, the signed addition should be saturated.
-	 */
-
-	ib = (INT32) (INT8)((offsetReg>>16)&0xFF);
-	ig = (INT32) (INT8)((offsetReg>>8)&0xFF);
-	ir = (INT32) (INT8)((offsetReg>>0)&0xFF);
-	ib *= 2;
-	ig *= 2;
-	ir *= 2;
-	
-	// Add with saturation
-	ib += (INT32) (UINT32) b;
-	if (ib < 0)			ib = 0;
-	else if (ib > 0xFF)	ib = 0xFF;
-	ig += (INT32) (UINT32) g;
-	if (ig < 0)			ig = 0;
-	else if (ig > 0xFF)	ig = 0xFF;
-	ir += (INT32) (UINT32) r;
-	if (ir < 0)			ir = 0;
-	else if (ir > 0xFF)	ir = 0xFF;
-	
-	// Construct the final 32-bit ABGR-format color
-	r = (UINT8) ir;
-	g = (UINT8) ig;
-	b = (UINT8) ib;
-	return ((UINT32)a<<24)|((UINT32)b<<16)|((UINT32)g<<8)|(UINT32)r;
-}
-
-void CTileGen::WritePalette(unsigned color, UINT32 data)
-{
-	UINT8		r, g, b, a;
-	
-	a = 0xFF * ((data>>15)&1); 	// decode the RGBA (make alpha 0xFF or 0x00)
-    a = ~a;                  	// invert it (set on Model 3 means clear pixel)
-	
-	if ((data&0x8000))
-    	r = g = b = 0;
-	else
-    {
-		b = (((data >> 10) & 0x1F) * 255) / 31;
-		g = (((data >> 5) & 0x1F) * 255) / 31;
-		r = ((data & 0x1F) * 255) / 31;
-	}
-
-	pal[0][color] = AddColorOffset(r, g, b, a, regs[0x40/4]);	// A/A'
-	pal[1][color] = AddColorOffset(r, g, b, a, regs[0x44/4]);	// B/B'
-}
-
-UINT32 CTileGen::ReadRegister(unsigned reg)
+UINT32 CTileGen::ReadRegister(unsigned reg) const
 {
   reg &= 0xFF;
-  return regs[reg/4];
+  return m_regs[reg/4];
 }
 
 void CTileGen::WriteRegister(unsigned reg, UINT32 data)
 {
 	reg &= 0xFF;
-		
+
 	switch (reg)
 	{
-  case 0x00:
+	case 0x00:
 	case 0x08:
 	case 0x0C:
+		//end of frame
 	case 0x20:
 	case 0x60:
 	case 0x64:
@@ -422,12 +356,16 @@ void CTileGen::WriteRegister(unsigned reg, UINT32 data)
 	case 0x6C:
 		break;
 	case 0x40:	// layer A/A' color offset
+		if (m_regs[reg / 4] != data) {
+			m_colourOffsetRegs[0].Update(data);
+			RecomputePalettes(0);
+		}
+		break;
 	case 0x44:	// layer B/B' color offset
-		// We only have a mechanism to recompute both palettes simultaneously.
-		// These regs are often written together in the same frame. To avoid
-		// needlessly recomputing both palettes twice, we defer the operation.
-		if (regs[reg/4] != data)	// only if changed
-			recomputePalettes = true;
+		if (m_regs[reg / 4] != data) {
+			m_colourOffsetRegs[1].Update(data);
+			RecomputePalettes(1);
+		}
 		break;
 	case 0x10:	// IRQ acknowledge
 		IRQ->Deassert(data&0xFF);
@@ -439,20 +377,19 @@ void CTileGen::WriteRegister(unsigned reg, UINT32 data)
 		//printf("%02X = %08X\n", reg, data);
 		break;
 	}
-	
+
 	// Modify register
-	regs[reg/4] = data;
+	m_regs[reg/4] = data;
 }
 
 void CTileGen::Reset(void)
 {
 	unsigned memSize = (m_gpuMultiThreaded ? MEMORY_POOL_SIZE : MEM_POOL_SIZE_RW);
 	memset(memoryPool, 0, memSize);
-	memset(regs, 0, sizeof(regs));
-	memset(regsRO, 0, sizeof(regsRO));
-	
-	InitPalette();
-	recomputePalettes = false;
+	memset(m_regs, 0, sizeof(m_regs));
+	m_busFree = 0;
+	m_busWritesDone = 0;
+	m_busFetching = false;
 
 	DebugLog("Tile Generator reset\n");
 }
@@ -466,25 +403,13 @@ void CTileGen::AttachRenderer(CRender2D *Render2DPtr)
 {
 	Render2D = Render2DPtr;
 
-	// If multi-threaded, attach read-only snapshots to renderer instead of real ones
-	if (m_gpuMultiThreaded)
-	{
-		Render2D->AttachVRAM(vramRO);
-		Render2D->AttachPalette((const UINT32 **)palRO);
-		Render2D->AttachRegisters(regsRO);
-	}
-	else
-	{
-		Render2D->AttachVRAM(vram);
-		Render2D->AttachPalette((const UINT32 **)pal);
-		Render2D->AttachRegisters(regs);
-	}
+	Render2D->AttachVRAM(m_vram);
+	Render2D->AttachRegisters(m_regs);
 
 	DebugLog("Tile Generator attached a Render2D object\n");
 }
 
-
-Result CTileGen::Init(CIRQ *IRQObjectPtr)
+Result CTileGen::Init(IIRQController *IRQObjectPtr)
 {
 	unsigned memSize   = (m_gpuMultiThreaded ? MEMORY_POOL_SIZE : MEM_POOL_SIZE_RW);
 	float	 memSizeMB = (float)memSize/(float)0x100000;
@@ -495,20 +420,9 @@ Result CTileGen::Init(CIRQ *IRQObjectPtr)
 		return ErrorLog("Insufficient memory for tile generator object (needs %1.1f MB).", memSizeMB);
 	
 	// Set up main pointers
-	vram = (UINT8 *) &memoryPool[OFFSET_VRAM];
-	pal[0] = (UINT32 *) &memoryPool[OFFSET_PAL_A];
-	pal[1] = (UINT32 *) &memoryPool[OFFSET_PAL_B];
-
-	// If multi-threaded, set up pointers for read-only snapshots and dirty page arrays too
-	if (m_gpuMultiThreaded)
-	{
-		vramRO = (UINT8 *) &memoryPool[OFFSET_VRAM_RO];
-		palRO[0] = (UINT32 *) &memoryPool[OFFSET_PAL_RO_A];
-		palRO[1] = (UINT32 *) &memoryPool[OFFSET_PAL_RO_B];
-		vramDirty = (UINT8 *) &memoryPool[OFFSET_VRAM_DIRTY];
-		palDirty[0] = (UINT8 *) &memoryPool[OFFSET_PAL_A_DIRTY];
-		palDirty[1] = (UINT8 *) &memoryPool[OFFSET_PAL_B_DIRTY];
-	}
+	m_vram	= (UINT8 *) &memoryPool[OFFSET_VRAM];
+	m_vramP	= (UINT32*)m_vram;
+	m_palP	= m_vramP + 0x40000;
 
 	// Hook up the IRQ controller
 	IRQ = IRQObjectPtr;
@@ -517,12 +431,31 @@ Result CTileGen::Init(CIRQ *IRQObjectPtr)
 	return Result::OKAY;
 }
 
-CTileGen::CTileGen(const Util::Config::Node &config)
-  : m_config(config),
-    m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>())
+CTileGen::CTileGen(const Util::Config::Node& config)
+	: //m_config(config),
+	m_gpuMultiThreaded(config["GPUMultiThreaded"].ValueAs<bool>()),
+	IRQ(nullptr),
+	Render2D(nullptr),
+	memoryPool(nullptr),
+	m_vram(nullptr),
+	m_vramP(nullptr),
+	m_palP(nullptr),
+	m_pal{nullptr},
+	m_regs{}
 {
-	IRQ = NULL;
-	memoryPool = NULL;
+	for (auto& s : m_drawSurface) {
+		s = std::make_shared<TileGenBuffer>();
+	}
+
+	for (auto& s : m_drawSurfaceRO) {
+		s = std::make_shared<TileGenBuffer>();
+	}
+
+	for (auto& p : m_pal) {
+		p = new UINT32[0x8000];
+		memset(p, 0, 0x8000 * sizeof(UINT32));
+	}
+
 	DebugLog("Built Tile Generator\n");
 }
 
@@ -542,11 +475,259 @@ CTileGen::~CTileGen(void)
 		printf("unable to dump %s\n", "tileram");
 #endif
 		
-	IRQ = NULL;
-	if (memoryPool != NULL)
-	{
-		delete [] memoryPool;
-		memoryPool = NULL;
+	IRQ = nullptr;
+	delete [] memoryPool;
+	memoryPool = nullptr;
+
+	m_vram	= nullptr;	// all allocated in mem pool
+	m_vramP	= nullptr;
+	m_palP	= nullptr;
+
+	for (auto& p : m_pal) {
+		delete[] p;
+		p = nullptr;
 	}
+	
 	DebugLog("Destroyed Tile Generator\n");
+}
+
+bool CTileGen::IsEnabled(int layerNumber) const
+{
+	return (m_regs[0x60 / 4 + layerNumber] & 0x80000000) > 0;
+}
+
+bool CTileGen::Above3D(int layerNumber) const
+{
+	return (m_regs[0x20 / 4] >> (8 + layerNumber)) & 0x1;
+}
+
+bool CTileGen::Is4Bit(int layerNumber) const
+{
+	return (m_regs[0x20 / 4] & (1 << (12 + layerNumber))) != 0;
+}
+
+int CTileGen::GetYScroll(int layerNumber) const
+{
+	return (m_regs[0x60 / 4 + layerNumber] >> 16) & 0x1FF;
+}
+
+int CTileGen::GetXScroll(int layerNumber) const
+{
+	return m_regs[0x60 / 4 + layerNumber] & 0x3FF;
+}
+
+bool CTileGen::LineScrollMode(int layerNumber) const
+{
+	return (m_regs[0x60 / 4 + layerNumber] & 0x8000) != 0;
+}
+
+int CTileGen::GetLineScroll(int layerNumber, int yCoord) const
+{
+	int index = ((0xF6000 + (layerNumber * 0x400)) / 4) + (yCoord / 2);
+	int shift = (1 - (yCoord % 2)) * 16;
+
+	return (m_vramP[index] >> shift) & 0xFFFFu;
+}
+
+int CTileGen::GetTilePairNumber(int xCoord, int yCoord, int xScroll, int yScroll) const
+{
+	int xIndex = ((xCoord + xScroll) / 16) & 0x1F;
+	int yIndex = ((yCoord + yScroll) / 8) & 0x3F;
+
+	return (yIndex * 32) + xIndex;
+}
+
+int CTileGen::GetTileData(int layerNum, int tilePairNumber) const
+{
+	int addressBase = (0xF8000 + (layerNum * 0x2000)) / 4;
+	return m_vramP[addressBase + tilePairNumber];
+}
+
+int CTileGen::GetVFine(int yCoord, int yScroll) const
+{
+	return (yCoord + yScroll) & 7;
+}
+
+int CTileGen::GetHFine(int xCoord, int xScroll) const
+{
+	return (xCoord + xScroll) & 15;
+}
+
+int CTileGen::GetLineMask(int layerNumber, int yCoord) const
+{
+	auto shift = (layerNumber < 2) ? 16u : 0u;
+	int index = (0xF7000 / 4) + yCoord;
+
+	return ((m_vramP[index] >> shift) & 0xFFFFu);
+}
+
+int CTileGen::GetPixelMask(int lineMask, int xCoord) const
+{
+	int maskTest = 1 << (15 - (xCoord / 32));
+
+	return (lineMask & maskTest) != 0;		// zero means alt layer
+}
+
+UINT32 CTileGen::GetColour32(int layer, UINT32 data) const
+{
+	int a = (((data >> 15) +1) & 1) * 255;
+	int b = ((((data >> 10) & 0x1F) * 255) / 31) & a;
+	int g = ((((data >> 5 ) & 0x1F) * 255) / 31) & a;
+	int r = (((data & 0x1F)         * 255) / 31) & a;
+
+	auto rr = m_colourOffsetRegs[layer].r + r;
+	auto gg = m_colourOffsetRegs[layer].g + g;
+	auto bb = m_colourOffsetRegs[layer].b + b;
+
+	//std::clamp is embarassingly slow in debug mode .. 
+
+	if (rr > 255)		rr = 255;
+	else if (rr < 0)	rr = 0;
+
+	if (gg > 255)		gg = 255;
+	else if (gg < 0)	gg = 0;
+
+	if (bb > 255)		bb = 255;
+	else if (bb < 0)	bb = 0;
+
+	return (a << 24) | (bb << 16) | (gg << 8) | rr;
+}
+
+void CTileGen::Draw4BitTilePair(int tileData, int hStart, int hEnd, int vFine, UINT32* const lineBuffer, const UINT32* const pal, int& x) const
+{
+	// Tile pattern offset: each tile occupies 32 bytes when using 4-bit pixels (offset of tile pattern within VRAM)
+	int patternOffset[2];
+
+	patternOffset[0] = (((tileData >> 16) & 0x3FFF) << 1) | ((tileData >> 31) & 1);
+	patternOffset[0] *= 32;
+	patternOffset[0] /= 4;
+
+	patternOffset[1] = ((tileData & 0x3FFF) << 1) | ((tileData >> 15) & 1);
+	patternOffset[1] *= 32;
+	patternOffset[1] /= 4;
+
+	// Upper color bits; the lower 4 bits come from the tile pattern
+	int paletteIndex[] = { (tileData >> 16) & 0x7FF0, tileData & 0x7FF0 };
+
+	uint32_t patterns[] = { m_vramP[patternOffset[0] + vFine], m_vramP[patternOffset[1] + vFine] };
+
+	for (int i = hStart; i < hEnd; i++, x++) {
+		auto pattern = patterns[i / 8];		// first 8 pixels use pattern 1, next 8 pattern 2
+		auto p = (pattern >> ((7 - (i % 8)) * 4)) & 0xFu;
+		auto colour32 = pal[paletteIndex[i / 8] | p];
+
+		if (colour32 >= 0x1000000) {		// if not transparent write pixel colour
+			lineBuffer[x] = colour32;
+		}
+	}
+}
+
+/*
+    the code above looks hard to understand but unrolled looks something like this
+	each line decodes 1 pixel (8 pixels make 1 tile)
+
+	pattern = vram[tileOffset + tileLine];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 28) & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 24) & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 20) & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 16) & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 12) & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 8)  & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 4)  & 0xF) ];
+	*colour16++ = pal[ paletteIndex | ((pattern >> 0)  & 0xF) ];
+*/
+
+void CTileGen::Draw8BitTilePair(int tileData, int hStart, int hEnd, int vFine, UINT32* const lineBuffer, const UINT32* const pal, int& x) const
+{
+	// Tile pattern offset: each tile occupies 64 bytes when using 8-bit pixels
+	int patternOffset[2];
+
+	patternOffset[0] = (tileData >> 16) & 0x3FFF;
+	patternOffset[0] *= 64;
+	patternOffset[0] /= 4;
+
+	patternOffset[1] = tileData & 0x3FFF;
+	patternOffset[1] *= 64;
+	patternOffset[1] /= 4;
+
+	// Upper color bits
+	int paletteIndex[2] = { (tileData >> 16) & 0x7F00, tileData & 0x7F00 };
+
+	uint32_t patterns[] = { m_vramP[patternOffset[0] + (vFine * 2)], m_vramP[patternOffset[0] + (vFine * 2) + 1],
+							m_vramP[patternOffset[1] + (vFine * 2)], m_vramP[patternOffset[1] + (vFine * 2) + 1]};
+
+	for (int i = hStart; i < hEnd; i++, x++) {
+		auto pattern = patterns[i / 4];		// each pattern contains 4 pixels
+		auto p = (pattern >> ((3 - (i % 4)) * 8)) & 0xFFu;
+		auto colour32 = pal[paletteIndex[i / 8] | p];
+
+		if (colour32 >= 0x1000000) {		// if not transparent write pixel colour
+			lineBuffer[x] = colour32;
+		}
+	}
+}
+
+void CTileGen::WritePalette(int layer, int address, UINT32 data)
+{
+	m_pal[layer][address] = GetColour32(layer, data);
+}
+
+void CTileGen::RecomputePalettes(int layer)
+{
+	for (int i = 0; i < 32768; i++) {
+		WritePalette(layer, i, m_palP[i]);
+	}
+}
+
+void CTileGen::DrawLine(int line)
+{
+	for (int i = 2; i-- > 0;) {
+
+		const int primaryIndex	= i * 2;
+		const int altIndex		= (i * 2) + 1;
+
+		bool hasLayer[2] = { IsEnabled(primaryIndex), IsEnabled(altIndex) };
+		if (!hasLayer[0] && !hasLayer[1]) {
+			continue;	// both disabled let's try next pair
+		}
+
+		UINT32* drawLayers[2] = { m_drawSurface[Above3D(primaryIndex)]->GetLine(line),
+								  m_drawSurface[Above3D(altIndex)]->GetLine(line) };
+
+		int lineMask	= GetLineMask(primaryIndex, line);
+		int scrollX[2]	= { LineScrollMode(primaryIndex) ? GetLineScroll(primaryIndex,line) : GetXScroll(primaryIndex),
+							LineScrollMode(altIndex) ? GetLineScroll(altIndex,line) : GetXScroll(altIndex) };
+		int scrollY[2]	= { GetYScroll(primaryIndex),GetYScroll(altIndex) };
+		
+		for (int x = 0; x < 496; ) {
+
+			int layer = (GetPixelMask(lineMask, x) + 1) & 1;	// 1 means primary layer, so we flip so it's zero
+			bool maskSwitch = GetPixelMask(lineMask, x) != GetPixelMask(lineMask, x + 15);
+
+			if (hasLayer[layer]) {
+
+				const auto index = primaryIndex + layer;
+
+				// tiles are loaded in pairs, since the RAM is 32-bit and each name table entry is 16-bit
+				// if the mask will change before we can draw all 16 pixels of the next tile pair, we reuse the previous tile pair
+				int tilePairNumber	= GetTilePairNumber(maskSwitch ? (x - 16) : x, line, scrollX[layer], scrollY[layer]);
+				int	hStart			= GetHFine(x, scrollX[layer]);
+				int hEnd			= maskSwitch ? 16 - (x & 15) : 16;
+				int vFine			= GetVFine(line, scrollY[layer]);
+				int tileData		= GetTileData(index, tilePairNumber);
+
+				if (Is4Bit(index)) {
+					Draw4BitTilePair(tileData, hStart, hEnd, vFine, drawLayers[layer], m_pal[index / 2], x);
+				}
+				else {
+					Draw8BitTilePair(tileData, hStart, hEnd, vFine, drawLayers[layer], m_pal[index / 2], x);
+				}
+			}
+			else {
+				int	hFine = GetHFine(x, 0);
+				x += 32 - hFine;
+			}
+		}
+
+	}
 }

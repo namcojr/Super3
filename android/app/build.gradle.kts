@@ -38,7 +38,7 @@ android {
 
     externalNativeBuild {
       cmake {
-        cppFlags += listOf("-std=c++17", "-fexceptions", "-frtti")
+        cppFlags += listOf("-fexceptions", "-frtti")
       }
     }
   }

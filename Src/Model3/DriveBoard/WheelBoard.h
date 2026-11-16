@@ -45,7 +45,7 @@ public:
    * Returns:
    *    Drive board type.
    */
-  Game::DriveBoardType GetType(void);
+  Game::DriveBoardType GetType(void) const;
 
   /*
    * Get7SegDisplays(seg1Digit1, seg1Digit2, seg2Digit1, seg2Digit2):
@@ -59,7 +59,7 @@ public:
    *    seg2Digit1  Second display, first digit.
    *    seg2Digit2  Second display, second digit.
    */
-  void Get7SegDisplays(UINT8 &seg1Digit, UINT8 &seg1Digit2, UINT8 &seg2Digit1, UINT8 &seg2Digit2);
+  void Get7SegDisplays(UINT8 &seg1Digit, UINT8 &seg1Digit2, UINT8 &seg2Digit1, UINT8 &seg2Digit2) const;
 
 
   /*
@@ -161,7 +161,6 @@ protected:
   void Disable(void);
 
 private:
-  void LoadLegacyState(CBlockFile *SaveState);
 
   UINT8 m_seg1Digit1;   // Current value of left digit on 7-segment display 1
   UINT8 m_seg1Digit2;   // Current value of right digit on 7-segment display 1
@@ -177,8 +176,14 @@ private:
   UINT8 m_prev42Out;      // Previous value sent to Z80 I/O port 42
   UINT8 m_prev46Out;      // Previous value sent to Z80 I/O port 46
 
-  UINT8 m_uncenterVal1;   // First part of pending uncenter command
-  UINT8 m_uncenterVal2;   // Second part of pending uncenter command
+  UINT8 m_uncenterVal1;   // Vibration, first byte: servo board sub-registers FC 0 (low nibble) and 1 (high nibble)
+  UINT8 m_uncenterVal2;   // Vibration, second byte: sub-registers FC 2 (low nibble) and 3 (high nibble)
+
+  UINT8 m_servoGain;      // Servo board torque gain (register FB), 0-127
+
+  // What the board asks for, sent to the wheel once a frame
+  INT8 m_constForce;      // Torque, before the gain
+  UINT8 m_vibrate;        // Vibration, before the gain
 
   // Feedback state
   INT8 m_lastConstForce;  // Last constant force command sent
@@ -194,6 +199,8 @@ private:
 
   void ProcessEncoderCmd(void);
 
+  void UpdateForceFeedback(void);
+
   void SendStopAll(void);
 
   void SendConstantForce(INT8 val);
@@ -204,13 +211,13 @@ private:
 
   void SendVibrate(UINT8 val);
 
-  uint8_t ReadADCChannel1();
+  uint8_t ReadADCChannel1() const;
 
-  uint8_t ReadADCChannel2();
+  uint8_t ReadADCChannel2() const;
 
-  uint8_t ReadADCChannel3();
+  uint8_t ReadADCChannel3() const;
 
-  uint8_t ReadADCChannel4();
+  uint8_t ReadADCChannel4() const;
 };
 
 #endif  // INCLUDED_WHEELBOARD_H

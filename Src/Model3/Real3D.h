@@ -1,12 +1,12 @@
 /**
  ** Supermodel
  ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson 
+ ** Copyright 2011 Bart Trzynadlowski, Nik Henson
  **
  ** This file is part of Supermodel.
  **
  ** Supermodel is free software: you can redistribute it and/or modify it under
- ** the terms of the GNU General Public License as published by the Free 
+ ** the terms of the GNU General Public License as published by the Free
  ** Software Foundation, either version 3 of the License, or (at your option)
  ** any later version.
  **
@@ -18,10 +18,10 @@
  ** You should have received a copy of the GNU General Public License along
  ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
  **/
- 
+
 /*
  * Real3D.h
- * 
+ *
  * Header file defining the CReal3D class: the Model 3's Real3D-based graphics
  * hardware.
  */
@@ -29,7 +29,9 @@
 #ifndef INCLUDED_REAL3D_H
 #define INCLUDED_REAL3D_H
 
-#include "IRQ.h"
+#include "CPU/IRQController.h"
+#include "Game.h"
+#include "JTAG.h"
 #include "PCI.h"
 #include "CPU/Bus.h"
 #include "Graphics/IRender3D.h"
@@ -38,7 +40,7 @@
 #include <cstdint>
 #include <unordered_map>
 
-/* 
+/*
  * QueuedUploadTextures:
  *
  * When rendering is multi-threaded, this struct is used to represent a postponed
@@ -55,6 +57,47 @@ struct QueuedUploadTextures
 };
 
 /*
+ * Real3DConfig:
+ *
+ * Hardware configuration of the Real3D graphics hardware. Use Model3() or
+ * Pro1000() to make a configuration.
+ */
+struct Real3DConfig
+{
+  // Size of polygon RAM in bytes. Model 3: 4 MB at 0x98000000. Pro-1000:
+  // 64 MB at 0x98000000-0x9BFFFFFF, enough for every 24-bit word address.
+  uint32_t polygonRAMSize = 0x400000;
+
+  // Size of the polygon RAM that is installed, in bytes. CReal3D::Init()
+  // clamps it to polygonRAMSize. Writes above it are ignored, and
+  // CReal3D::ReadPolygonRAM() returns 0 there. Model 3: 4 MB. Pro-1000: 8,
+  // 16, 24, or 32 MB.
+  uint32_t installedPolygonRAMSize = 0x400000;
+
+  // If true, there is no VROM and polygon RAM replaces it: model and texture
+  // word addresses at 0x100000 and above address polygon RAM (Pro-1000). If
+  // false, they address VROM (Model 3).
+  bool vromIsPolygonRAM = false;
+
+  // PCI vendor and device ID of the ASIC that is connected to the PCI slot
+  // (CReal3D::PCIID). Model 3 Step 1.x and the Pro-1000: Step1x. Model 3
+  // Step 2.x: Step2x.
+  uint32_t pciID = 0;
+
+  // If true, the texture port (0x90000000) takes one word: the word address
+  // of a texture block in VROM (Model 3 Step 1.0 and the Pro-1000). If false,
+  // it takes two words: the address and the texture header (Model 3 Step 1.5
+  // and later).
+  bool singleWordTexturePort = false;
+
+  // Model 3 configuration of the stepping
+  static Real3DConfig Model3(Game::Stepping stepping);
+
+  // Real3D Pro-1000 configuration. The installed polygon RAM is in bytes.
+  static Real3DConfig Pro1000(uint32_t installedPolygonRAMSize);
+};
+
+/*
  * CReal3D:
  *
  * Model 3 Real3D-based graphics hardware. This class manages the hardware
@@ -68,10 +111,11 @@ public:
   /*
    * PCI IDs
    *
-   * The CReal3D object must be configured with the desired ID. Some Step 2.x
-   * appear to defy this and expect the 1.x ID. The symptom of this is that 
-   * VBL is enabled briefly then disabled. This should be investigated further.
-   * Perhaps a different ASIC's PCI ID is being read in these situations?
+   * The CReal3D object must be configured with the PCI ID of the ASIC directly
+   * connected to the PCI slot; 0x16c311db for Step 1.x, 0x178611db for Step
+   * 2.x. Requesting PCI ID via the DMA device on Step 2.x appears to return
+   * the PCI ID of Mercury which is the ASIC connected to the PCI slot on Step
+   * 1.x, hence why some Step 2.x games appear to expect the 1.x ID.
    *
    * The vendor ID code 0x11db is Sega's.
    */
@@ -79,21 +123,6 @@ public:
   {
     Step1x = 0x16C311DB,  // Step 1.x
     Step2x = 0x178611DB   // Step 2.x
-  };
-
-  /*
-   * ASIC Names
-   *
-   * These were determined from Virtual On, which prints them out if any of the
-   * ID codes are incorrect. ID codes depend on stepping.
-   */
-  enum ASIC
-  {
-    Mercury,
-    Venus,
-    Earth,
-    Mars,
-    Jupiter
   };
 
   /*
@@ -117,12 +146,12 @@ public:
   void LoadState(CBlockFile *SaveState);
 
   /*
-   * BeginVBlank(statusCycles):
+   * BeginVBlank(void):
    *
    * Must be called before the VBlank starts.
    */
-  void BeginVBlank(int statusCycles);
-  
+  void BeginVBlank(void);
+
   /*
    * EndVBlank(void)
    *
@@ -133,7 +162,10 @@ public:
   /*
    * FlipPingPongBit(void)
    *
-   * Any writes that happen after the ping_pong bit flips but before VBlank are buffered.
+   * Any writes that happen after the ping_pong bit flips but before v-blank are buffered.
+   * During v-blank these buffered writes are then copied to the normal memory destinations.
+   * The ping_pong flip time comes from the tilegen.
+   * The point of this is so the CPU can be calculating the data for the next frame whilst the GPU is rendering
    */
   void FlipPingPongBit(void);
 
@@ -156,7 +188,7 @@ public:
    * since it may be running in a separate thread.
    */
   void BeginFrame(void);
-  
+
   /*
    * RenderFrame(void):
    *
@@ -174,18 +206,18 @@ public:
    * may be running in a separate thread.
    */
   void EndFrame(void);
-  
+
   /*
    * Flush(void):
    *
    * Triggers the beginning of a new frame. All textures in the texture FIFO
-   * are uploaded and the FIFO is reset. On the real device, this seems to 
+   * are uploaded and the FIFO is reset. On the real device, this seems to
    * cause a frame to be rendered as well but this is not performed here.
    *
    * This should be called when the command port is written.
    */
   void Flush(void);
-   
+
   /*
    * ReadDMARegister8(reg):
    * ReadDMARegister32(reg):
@@ -199,9 +231,9 @@ public:
    * Returns:
    *    Data of the requested size, in little endian.
    */
-  uint8_t ReadDMARegister8(unsigned reg);
-  uint32_t ReadDMARegister32(unsigned reg);
-  
+  uint8_t ReadDMARegister8(unsigned reg) const;
+  uint32_t ReadDMARegister32(unsigned reg) const;
+
   /*
    * WriteDMARegister8(reg, data):
    * WriteDMARegister32(reg, data);
@@ -215,35 +247,65 @@ public:
    */
   void WriteDMARegister8(unsigned reg, uint8_t data);
   void WriteDMARegister32(unsigned reg, uint32_t data);
-  
+
+
+  /*
+   * WriteConfigurationRegister(reg, data):
+   *
+   * Write to a configuration register. Written data must be
+   * byte reversed (this is a little endian device).
+   *
+   * Parameters:
+   *    reg   Register number to write to(0-0x3 only).
+   *    data  Data to write.
+   */
+  void WriteConfigurationRegister(unsigned reg, uint32_t data);
+
+  /*
+   * ReadConfigurationRegister(reg):
+   *
+   * Reads a configuration register. Mercury uses this to capture its update
+   * memory configuration register (JTAG instruction 0x09).
+   *
+   * Parameters:
+   *    reg   Register byte offset (0x0, 0x4, 0x8, or 0xC).
+   *
+   * Returns:
+   *    Register value.
+   */
+  uint32_t ReadConfigurationRegister(unsigned reg) const
+  {
+    return m_configRegisters.regs[(reg & 0xF) / 4];
+  }
+
   /*
    * WriteLowCullingRAM(addr, data):
    *
    * Writes the low culling RAM region. Because this is a little endian
    * device, big endian devices/buses have to take care to manually reverse
-   * the data before writing. 
-   * 
+   * the data before writing.
+   *
    * Parameters:
    *    addr  Word (32-bit) aligned address ranging from 0 to 0x3FFFFC.
    *          User must ensure address is properly clamped.
    *    data  Data to write.
    */
   void WriteLowCullingRAM(uint32_t addr, uint32_t data);
-  
+
   /*
    * WriteHighCullingRAM(addr, data):
    *
    * Writes the high culling RAM region. Because this is a little endian
    * device, big endian devices/buses have to take care to manually reverse
-   * the data before writing. 
-   * 
+   * the data before writing.
+   *
    * Parameters:
    *    addr  Word (32-bit) aligned address ranging from 0 to 0xFFFFC.
    *          User must ensure address is properly clamped.
    *    data  Data to write.
    */
   void WriteHighCullingRAM(uint32_t addr, uint32_t data);
-  
+
   /*
    * WriteTextureFIFO(data):
    *
@@ -255,7 +317,7 @@ public:
    *    data  Data to write.
    */
   void WriteTextureFIFO(uint32_t data);
-  
+
   /*
    * WriteTexturePort(reg, data):
    *
@@ -269,33 +331,46 @@ public:
    *          register 8 triggers the upload.
    */
   void WriteTexturePort(unsigned reg, uint32_t data);
-  
+
   /*
    * WritePolygonRAM(addr, data):
    *
    * Writes the polygon RAM region. Because this is a little endian device,
    * big endian devices/buses have to take care to manually reverse the data
-   * before writing. 
-   * 
+   * before writing.
+   *
    * Parameters:
    *    addr  Word (32-bit) aligned address ranging from 0 to 0x3FFFFC.
    *          User must ensure address is properly clamped.
    *    data  Data to write.
    */
   void WritePolygonRAM(uint32_t addr, uint32_t data);
-  
+
   /*
-   * WriteJTAGRegister(instruction, data):
+   * ReadPolygonRAM(addr):
    *
-   * Write to an internal register using the JTAG interface. This is intended
-   * to be called from the JTAG emulation for instructions that are known to
-   * poke the internal state of Real3D ASICs.
+   * Reads a word of polygon RAM (for the JTAG memory test access of Venus).
    *
    * Parameters:
-   *    instruction   Value of the JTAG instruction register.
-   *    data          Data written.
+   *    addr  Byte address in polygon RAM.
+   *
+   * Returns:
+   *    The word, or 0 if the address is above the installed polygon RAM.
    */
-  void WriteJTAGRegister(uint64_t instruction, uint64_t data);
+  uint32_t ReadPolygonRAM(uint32_t addr) const;
+
+  /*
+  * WriteJTAGModeword(device, data):
+  *
+  * Write to an internal modeword register using the JTAG interface. This is
+  * intended to be called from the JTAG emulation to poke the internal state
+  * of Real3D ASICs.
+  *
+  * Parameters:
+  *    device   Name of the Real3D ASIC whose modeword is being accessed.
+  *    data     Data written.
+  */
+  void WriteJTAGModeword(CASIC::Name device, uint32_t data);
 
   /*
    * ReadRegister(reg):
@@ -309,7 +384,7 @@ public:
    *    The 32-bit status register.
    */
   uint32_t ReadRegister(unsigned reg);
-  
+
   /*
    * ReadPCIConfigSpace(device, reg, bits, offset):
    *
@@ -327,8 +402,8 @@ public:
    * Returns:
    *    Register data.
    */
-  uint32_t ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned width);
-  
+  uint32_t ReadPCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset) const;
+
   /*
    * WritePCIConfigSpace(device, reg, bits, offset, data):
    *
@@ -344,16 +419,22 @@ public:
    *            register number.
    *    data    Data.
    */
-  void WritePCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned width, uint32_t data);
+  void WritePCIConfigSpace(unsigned device, unsigned reg, unsigned bits, unsigned offset, uint32_t data);
 
   /*
    * TilegenDrawFrame(flags):
    *
-   * The tilegen controls the frame timing. A write to reg 0x0C appears to
-   * trigger the 3D hardware to draw the frame.
+   * The tilegen controls the frame timing. When reg 0x0C is written to it seems to trigger the 3d h/w to draw the frame.
+   * For a frame to actually draw Flush or 0x88 must have been called. This can happen before or after 0x0C has been written to.
+   * Flush signifies a transfer has been completed and the database has been updated. Some games call this multiple times per frame.
+   * 0xC can be called before or after the ping_pong bit has flipped. If it's called after, the frame will start to draw when v-blank starts.
+   *
+   * Parameters:
+   *    flags   A bitmask controlling behavior. Unknown what it does exactly.
+   *            3 binary (11) or 7 binary (111) are written by games.
    */
   void TilegenDrawFrame(uint32_t flags);
-  
+
   /*
    * Reset(void):
    *
@@ -361,7 +442,7 @@ public:
    * device.
    */
   void Reset(void);
-  
+
   /*
    * AttachRenderer(render3DPtr):
    *
@@ -373,42 +454,10 @@ public:
    *    Render3DPtr   Pointer to a 3D renderer object.
    */
   void AttachRenderer(IRender3D *Render3DPtr);
-  
-  /*
-   * GetASICIDCodes(asic):
-   *
-   * Obtain ASIC ID code for the specified ASIC under the currently configured
-   * hardware stepping.
-   *
-   * Parameters:
-   *    asic  ASIC ID.
-   *
-   * Returns:
-   *    The ASIC ID code. Undefined for invalid ASIC ID.
-   */
-  uint32_t GetASICIDCode(ASIC asic) const;
+
 
   /*
-   * SetStepping(stepping, pciIDValue):
-   *
-   * Sets the Model 3 hardware stepping, which also determines the Real3D
-   * functionality. The default is Step 1.0. This should be called prior to 
-   * any other emulation functions and after Init().
-   *
-   * Parameters:
-   *    stepping    0x10 for Step 1.0, 0x15 for Step 1.5, 0x20 for Step 2.0, or
-   *                0x21 for Step 2.1. Anything else defaults to 1.0.
-   *    pciIDValue  The PCI ID code to return. This should be one of the PCIID
-   *                enum values otherwise games may fail to boot. Although the
-   *                PCI ID depends on stepping, there are a few games that
-   *                have to be explicitly configured with an older ID code,
-   *                which is why this parameter is exposed.
-   */
-  void SetStepping(int stepping, uint32_t pciIDValue);
-
-  
-  /*
-   * Init(vromPtr, BusObjectPtr, IRQObjectPtr, dmaIRQBit):
+   * Init(vromPtr, BusObjectPtr, IRQObjectPtr, dmaIRQBit, hwConfig):
    *
    * One-time initialization of the context. Must be called prior to all
    * other members. Connects the Real3D device to its video ROM and allocates
@@ -416,20 +465,22 @@ public:
    *
    * Parameters:
    *    vromPtr       A pointer to video ROM (with each 32-bit word in
-   *                  its native little endian format).
+   *                  its native little endian format). Not used, and can be
+   *                  null, if hwConfig.vromIsPolygonRAM is true.
    *    BusObjectPtr  Pointer to the bus that the 53C810 has control
    *                  over. Used to read/write memory.
    *    IRQObjectPtr  Pointer to the IRQ controller. Used to trigger SCSI
    *                  and DMA interrupts.
-   *    dmaIRQBit     IRQ identifier bit to pass along to IRQ controller
+   *    dmaIRQBit     IRQ line mask to pass along to IRQ controller
    *                  when asserting interrupts.
+   *    hwConfig      Hardware configuration (see Real3DConfig).
    *
    * Returns:
    *    OKAY if successful otherwise FAIL (not enough memory). Prints own
    *    errors.
    */
-  Result Init(const uint8_t *vromPtr, IBus *BusObjectPtr, CIRQ *IRQObjectPtr, unsigned dmaIRQBit);
-   
+  Result Init(const uint8_t *vromPtr, IBus *BusObjectPtr, IIRQController *IRQObjectPtr, uint16_t dmaIRQBit, const Real3DConfig &hwConfig);
+
   /*
    * CReal3D(config):
    * ~CReal3D(void):
@@ -442,8 +493,31 @@ public:
    */
   CReal3D(const Util::Config::Node &config);
   ~CReal3D(void);
-  
+
 private:
+
+    struct UpdateBlock
+    {
+        uint32_t startAddr;
+        uint32_t lastAddr;
+        uint32_t data[1];     // this will be expandable
+
+        uint32_t Count() const
+        {
+            return lastAddr - startAddr + 1;    // container will always contain at least 1 element
+        }
+
+        static constexpr uint32_t HeaderSize()
+        {
+            return 2;     // startAddr + lastAddr in 32bit words
+        }
+
+        UpdateBlock* Next()
+        {
+            return (UpdateBlock*)((uint32_t*)this + HeaderSize() + Count());
+        }
+    };
+
   // Private member functions
   void      DMACopy(void);
   void      StoreTexture(unsigned level, unsigned xPos, unsigned yPos, unsigned width, unsigned height, const uint16_t *texData, bool sixteenBit, bool writeLSB, bool writeMSB, uint32_t &texDataOffset);
@@ -451,82 +525,110 @@ private:
   void      UploadTexture(uint32_t header, const uint16_t *texData);
   uint32_t  UpdateSnapshots(bool copyWhole);
   uint32_t  UpdateSnapshot(bool copyWhole, uint8_t *src, uint8_t *dst, unsigned size, uint8_t *dirty);
+  void      SyncBufferedMem(UpdateBlock* updateBlock, uint32_t* updateBuffer, uint32_t* dst, uint32_t dstWords, uint8_t* dirty);
+  bool      UpdateBuffersActive(void) const;
+  bool      AddToUpdateBuffer(UpdateBlock *&block, uint32_t *bufferStart, uint32_t *bufferEnd, uint32_t addr, uint32_t data);
   void      FlushTextures();
   bool      PollPingPong();
   void      DrawFrame();
 
-  // Config 
+  // Config
   const Util::Config::Node &m_config;
   const bool                m_gpuMultiThreaded;
 
+  // Hardware configuration, and the layout of the memory pool that follows
+  // from it (offsets and sizes in bytes)
+  Real3DConfig m_hwConfig;
+  struct MemoryLayout
+  {
+    uint32_t cullingRAMLo, cullingRAMHi, polyRAM, textureRAM, textureFIFO;
+    uint32_t sizeRW;          // writable memory (saved in save states)
+    uint32_t cullingRAMLoRO, cullingRAMHiRO, polyRAMRO, textureRAMRO;
+    uint32_t sizeRO;          // read-only snapshots
+    uint32_t cullingRAMLoDirty, cullingRAMHiDirty, polyRAMDirty, textureRAMDirty;
+    uint32_t sizeDirty;       // dirty page arrays
+    uint32_t total;
+  } m_layout;
+
   // Renderer attached to the Real3D
-  IRender3D *Render3D;
-  
+  IRender3D *Render3D = nullptr;
+
   // Data passed from Model 3 object
-  const uint32_t  *vrom;  // Video ROM
-  int             step;   // hardware stepping (as in GameInfo structure)
-  uint32_t        pciID;  // PCI vendor and device ID
-  
+  const uint32_t  *vrom = nullptr;          // Video ROM (polygon RAM if m_hwConfig.vromIsPolygonRAM)
+
   // Error flag (to limit errors to once per frame)
-  bool error; // true if an error occurred this frame
+  bool error = false;   // true if an error occurred this frame
 
   // Real3D memory
-  uint8_t   *memoryPool;        // all memory allocated here
-  uint32_t  *cullingRAMLo;      // 4MB of culling RAM at 8C000000
-  uint32_t  *cullingRAMHi;      // 1MB of culling RAM at 8E000000
-  uint32_t  *polyRAM;           // 4MB of polygon RAM at 98000000
-  uint16_t  *textureRAM;        // 8MB of internal texture RAM
-  uint32_t  *textureFIFO;       // 1MB texture FIFO at 0x94000000
-  uint32_t  fifoIdx;            // index into texture FIFO
-  uint32_t  m_vromTextureFIFO[2];
-  uint32_t  m_vromTextureFIFOIdx;
-  
+  uint8_t   *memoryPool = nullptr;      // all memory allocated here
+  uint32_t  *cullingRAMLo = nullptr;    // 4MB of culling RAM at 8C000000
+  uint32_t  *cullingRAMHi = nullptr;    // 1MB of culling RAM at 8E000000
+  uint32_t  *polyRAM = nullptr;         // polygon RAM at 98000000 (Model 3: 4MB, Pro-1000: 64MB)
+  uint16_t  *textureRAM = nullptr;      // 8MB of internal texture RAM
+  uint32_t  *textureFIFO = nullptr;     // 1MB texture FIFO at 0x94000000
+  uint32_t  fifoIdx = 0;                // index into texture FIFO
+  uint32_t  m_vromTextureFIFO[2] = { 0,  0 };
+  uint32_t  m_vromTextureFIFOIdx = 0;
+
+  union ConfigRegisters {
+      uint32_t regs[4];
+      struct {
+          uint32_t pingPongMemSize;             // in 32bit words
+          uint32_t flags;
+          uint32_t pingPongAndUpdateMemSize;    // in 32bit words
+          uint32_t unused;
+      };
+  } m_configRegisters;
+
+
   // Read-only snapshots
-  uint32_t  *cullingRAMLoRO;    // 4MB of culling RAM at 8C000000 [read-only snapshot]
-  uint32_t  *cullingRAMHiRO;    // 1MB of culling RAM at 8E000000 [read-only snapshot]
-  uint32_t  *polyRAMRO;         // 4MB of polygon RAM at 98000000 [read-only snapshot]
-  uint16_t  *textureRAMRO;      // 8MB of internal texture RAM    [read-only snapshot]
-  
+  uint32_t  *cullingRAMLoRO = nullptr;  // 4MB of culling RAM at 8C000000 [read-only snapshot]
+  uint32_t  *cullingRAMHiRO = nullptr;  // 1MB of culling RAM at 8E000000 [read-only snapshot]
+  uint32_t  *polyRAMRO = nullptr;       // polygon RAM at 98000000       [read-only snapshot]
+  uint16_t  *textureRAMRO = nullptr;    // 8MB of internal texture RAM    [read-only snapshot]
+
   // Arrays to keep track of dirty pages in memory regions
-  uint8_t   *cullingRAMLoDirty;
-  uint8_t   *cullingRAMHiDirty;
-  uint8_t   *polyRAMDirty;
-  uint8_t   *textureRAMDirty;
+  uint8_t   *cullingRAMLoDirty = nullptr;
+  uint8_t   *cullingRAMHiDirty = nullptr;
+  uint8_t   *polyRAMDirty = nullptr;
+  uint8_t   *textureRAMDirty = nullptr;
 
   // Queued texture uploads
   std::vector<QueuedUploadTextures> queuedUploadTextures;
   std::vector<QueuedUploadTextures> queuedUploadTexturesRO;  // Read-only copy of queue
-  
+
   // Big endian bus object for DMA memory access
-  IBus  *Bus;
-  
+  IBus  *Bus = nullptr;
+
   // IRQ handling
-  CIRQ    *IRQ;   // IRQ controller
-  uint32_t  dmaIRQ; // IRQ bit to use when calling IRQ handler
-  
+  IIRQController *IRQ = nullptr;  // IRQ controller
+  uint16_t  dmaIRQ = 0;           // IRQ line mask to use when calling IRQ controller
+
   // DMA device
-  uint32_t  dmaSrc;
-  uint32_t  dmaDest;
-  uint32_t  dmaLength;
-  uint32_t  dmaData;
-  uint32_t  dmaUnknownReg;
-  uint8_t   dmaStatus;
-  uint8_t   dmaConfig;
-  
+  uint32_t  dmaSrc = 0;
+  uint32_t  dmaDest = 0;
+  uint32_t  dmaLength = 0;
+  uint32_t  dmaData = 0;
+  uint32_t  dmaUnknownReg = 0;
+  uint8_t   dmaStatus = 0;
+  uint8_t   dmaConfig = 0;
+
   // Command port
-  bool  commandPortWritten;
-  bool  m_tilegenDrawFrame;
-  
+  bool  commandPortWritten = false;
+  bool  m_tilegenDrawFrame = false;
+
   // Status and command registers
-  uint32_t m_pingPong;
-  uint32_t m_pingPongCopy;
-  uint64_t statusChange = 0;
-  bool m_evenFrame = false;
-  bool m_useLegacyStatusBit = false;
-  
+  uint32_t m_pingPong = 0;
+  uint32_t m_pingPongCopy = 0;      // we copy the value during v-blank to see if ping_pong has flipped during the frame
+  bool m_blockCullingRO = false;    // really just disables rendering
+
   // Internal ASIC state
-  std::unordered_map<ASIC, uint32_t> m_asicID;
-  uint64_t m_internalRenderConfig[2];
+  uint64_t m_internalRenderConfig[2] = { 0, 0 };
+  uint32_t m_modeword[5] = { 0, 0, 0, 0, 0 };
+
+  // pointers to our buffered memory
+  UpdateBlock* m_polyUpdateBlock = nullptr;
+  UpdateBlock* m_highRamUpdateBlock = nullptr;
 };
 
 

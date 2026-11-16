@@ -1,12 +1,34 @@
+/**
+ ** Supermodel
+ ** A Sega Model Series Arcade Emulator.
+ **
+ ** This file is part of Supermodel.
+ **
+ ** Supermodel is free software: you can redistribute it and/or modify it under
+ ** the terms of the GNU General Public License as published by the Free
+ ** Software Foundation, either version 3 of the License, or (at your option)
+ ** any later version.
+ **
+ ** Supermodel is distributed in the hope that it will be useful, but WITHOUT
+ ** ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ ** FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ ** more details.
+ **
+ ** You should have received a copy of the GNU General Public License along
+ ** with Supermodel.  If not, see <http://www.gnu.org/licenses/>.
+ **/
+
 #ifndef _R3DSHADERQUADS_H_
 #define _R3DSHADERQUADS_H_
 
-static const char *vertexShaderR3DQuads = R"glsl(
+static const char* vertexShaderR3DQuads = R"glsl(
 
-#version 450 core
+#version 410 core
 
 // uniforms
 uniform float	modelScale;
+uniform float	nodeAlpha;
+uniform float	cota;
 uniform mat4	modelMat;
 uniform mat4	projMat;
 uniform bool	translatorMap;
@@ -18,6 +40,7 @@ in vec2		inTexCoord;
 in vec3		inFaceNormal;		// used to emulate r3d culling 
 in float	inFixedShade;
 in vec4		inColour;
+in float	inTextureNP;
 
 // outputs to geometry shader
 
@@ -29,6 +52,7 @@ out VS_OUT
 	vec4	color;
 	float	fixedShade;
 	float	discardPoly;	// can't have varying bool (glsl spec)
+	float	LODBase;
 } vs_out;
 
 vec4 GetColour(vec4 colour)
@@ -38,6 +62,8 @@ vec4 GetColour(vec4 colour)
 	if(translatorMap) {
 		c.rgb *= 16.0;
 	}
+
+	c.a *= nodeAlpha;
 
 	return c;
 }
@@ -53,19 +79,20 @@ float CalcBackFace(in vec3 viewVertex)
 
 void main(void)
 {
-	vs_out.viewVertex	= vec3(modelMat * inVertex);
-	vs_out.viewNormal	= (mat3(modelMat) * inNormal) / modelScale;
+	vs_out.viewVertex	= (modelMat * inVertex).xyz;
+	vs_out.viewNormal	= (mat3(modelMat) / modelScale) * inNormal;
 	vs_out.discardPoly	= CalcBackFace(vs_out.viewVertex);
-	vs_out.color    	= GetColour(inColour);
+	vs_out.color		= GetColour(inColour);
 	vs_out.texCoord		= inTexCoord;
 	vs_out.fixedShade	= inFixedShade;
-	gl_Position			= projMat * modelMat * inVertex;
+	vs_out.LODBase		= vs_out.discardPoly * -cota * inTextureNP;
+	gl_Position			= (projMat * modelMat) * inVertex;
 }
 )glsl";
 
-static const char *geometryShaderR3DQuads = R"glsl(
+static const char* geometryShaderR3DQuads = R"glsl(
 
-#version 450 core
+#version 410 core
 
 layout (lines_adjacency) in;
 layout (triangle_strip, max_vertices = 4) out;
@@ -78,20 +105,29 @@ in VS_OUT
 	vec4	color;
 	float	fixedShade;
 	float	discardPoly;	// can't have varying bool (glsl spec)
+	float	LODBase;
 } gs_in[4];
 
 out GS_OUT
 {
 	noperspective vec2 v[4];
-	noperspective float area[4];
-	flat float oneOverW[4];
+	noperspective vec4 area;		// vec4s rather than float[4], each array element takes a whole input slot
+	flat vec4 oneOverW;
 
 	//our regular attributes
 	flat vec3	viewVertex[4];
 	flat vec3	viewNormal[4];		// per vertex normal vector
 	flat vec2	texCoord[4];
 	flat vec4	color;
-	flat float	fixedShade[4];
+	flat vec4	fixedShade;
+	flat float	LODBase;
+	vec4 barycentricCoords;			// w = 1: triangle (see main)
+
+	// the emitted vertex's own attributes, interpolated by the gpu across each triangle (triangles + edge fallback)
+	vec3	triViewVertex;
+	vec3	triViewNormal;
+	vec2	triTexCoord;
+	float	triFixedShade;
 } gs_out;
 
 //a*b - c*d, computed in a stable fashion (Kahan)
@@ -103,40 +139,77 @@ float DifferenceOfProducts(float a, float b, float c, float d)
     return dop + err;
 }
 
+// writes vertex i's attributes, returns its projected position
+vec2 SetVertexAttribs(int i)
+{
+	float oneOverW			= 1.0 / gl_in[i].gl_Position.w;
+	gs_out.oneOverW[i]		= oneOverW;
+
+	// our regular vertex attribs
+	gs_out.viewVertex[i]	= gs_in[i].viewVertex * oneOverW;
+	gs_out.viewNormal[i]	= gs_in[i].viewNormal * oneOverW;
+	gs_out.texCoord[i]		= gs_in[i].texCoord   * oneOverW;
+	gs_out.fixedShade[i]	= gs_in[i].fixedShade * oneOverW;
+
+	return gl_in[i].gl_Position.xy * oneOverW;
+}
+
+// writes vertex i's attributes for the gpu to interpolate across the emitted triangle
+void SetTriAttribs(int i)
+{
+	gs_out.triViewVertex	= gs_in[i].viewVertex;
+	gs_out.triViewNormal	= gs_in[i].viewNormal;
+	gs_out.triTexCoord		= gs_in[i].texCoord;
+	gs_out.triFixedShade	= gs_in[i].fixedShade;
+}
+
 void main(void)
 {
-	if(gs_in[0].discardPoly > 0) {
+	if(gs_in[0].discardPoly > 0.0) {
 		return;					//emulate back face culling here (all vertices in poly have same value)
+	}
+
+	// Triangles: stored as quads with vertex 3 being a copy of vertex 2 (CNew3D::CopyVertexData), and the same transform makes both
+	// positions bit-identical (not spec guaranteed though). The quad code can't handle a duplicate vertex, so emit just 0-2, flagged
+	// (barycentricCoords.w) for the fragment shader's barycentric path, which is exact for it. Slot 3 must still be set
+	// below: the fragment shader reads its oneOverW in the coplanar depth test, and the rest with weight 0.
+	bool triangle = (gl_in[3].gl_Position == gl_in[2].gl_Position);
+
+	// flat attributes
+	gs_out.color = gs_in[0].color;
+	gs_out.LODBase = gs_in[0].LODBase;
+
+	if (triangle) {
+		for (int i=0; i<4; i++) {
+			SetVertexAttribs(i);
+		}
+		for (int i=0; i<3; i++) {
+			gs_out.barycentricCoords = vec4(i==0, i==1, i==2, 1.0);
+			SetTriAttribs(i);
+			gl_Position = gl_in[i].gl_Position;
+			EmitVertex();
+		}
+		return;
 	}
 
 	vec2 v[4];
 
 	for (int i=0; i<4; i++) {
-		float oneOverW		= 1.0 / gl_in[i].gl_Position.w;
-		gs_out.oneOverW[i]	= oneOverW;
-		v[i]				= gl_in[i].gl_Position.xy * oneOverW;
-
-		// our regular vertex attribs
-		gs_out.viewVertex[i]	= gs_in[i].viewVertex * oneOverW;
-		gs_out.viewNormal[i]	= gs_in[i].viewNormal * oneOverW;
-		gs_out.texCoord[i]		= gs_in[i].texCoord   * oneOverW;
-		gs_out.fixedShade[i]	= gs_in[i].fixedShade * oneOverW;
+		v[i] = SetVertexAttribs(i);
 	}
 
-	// flat attributes
-	gs_out.color = gs_in[0].color;
-
 	// precompute crossproducts for all vertex combinations to be looked up in loop below for area computation
-	precise float cross[4][4];
+	// (cross[i*4+j] for vertices i and j; a flat array because arrays of arrays would need GLSL 4.30)
+	precise float cross[16];
 	for (int i=0; i<4; i++)
 	{
-		cross[i][i] = 0.0;
+		cross[i*4+i] = 0.0;
 		for (int j=i+1; j<4; j++)
-			cross[i][j] = DifferenceOfProducts(gl_in[i].gl_Position.x, gl_in[j].gl_Position.y, gl_in[j].gl_Position.x, gl_in[i].gl_Position.y) / (gl_in[i].gl_Position.w * gl_in[j].gl_Position.w);
+			cross[i*4+j] = DifferenceOfProducts(gl_in[i].gl_Position.x, gl_in[j].gl_Position.y, gl_in[j].gl_Position.x, gl_in[i].gl_Position.y) / (gl_in[i].gl_Position.w * gl_in[j].gl_Position.w);
 	}
 	for (int i=1; i<4; i++)
 		for (int j=0; j<i; j++)
-			cross[i][j] = -cross[j][i];
+			cross[i*4+j] = -cross[j*4+i];
 
 	for (int i=0; i<4; i++) {
 		// Mapping of polygon vertex order to triangle strip vertex order.
@@ -144,12 +217,12 @@ void main(void)
 		// Quad (lines adjacency)    Triangle strip
 		// vertex order:             vertex order:
 		// 
-		//        1----2                 1----3
-		//        |    |      ===>       | \  |
-		//        |    |                 |  \ |
-		//        0----3                 0----2
+		//        1----2                 0----2
+		//        |    |      ===>       |  / |
+		//        |    |                 | /  |
+		//        0----3                 1----3
 		//
-		int reorder[4] = int[]( 1, 0, 2, 3 );
+		const int reorder[4] = int[4]( 1, 0, 2, 3 );
 		int ii = reorder[i];
 
 		for (int j=0; j<4; j++) {
@@ -157,8 +230,18 @@ void main(void)
 			int j_next = (j+1) % 4;
 			// compute area via shoelace algorithm BUT divided by w afterwards to improve precision!
 			// in addition also use Kahans algorithm to further improve precision of the 2D crossproducts
-			gs_out.area[j] = cross[j][j_next] + cross[j_next][ii] + cross[ii][j];
+			gs_out.area[j] = cross[j*4+j_next] + cross[j_next*4+ii] + cross[ii*4+j];
 		}
+
+		const vec3 bary[4] = vec3[](
+			vec3(1.0, 0.0, 0.0),
+			vec3(0.0, 1.0, 0.0),
+			vec3(0.0, 0.0, 1.0),
+			vec3(0.0,-1.0, 0.0)		// make the last coordinate negative so we can tell the difference between the triangles
+		);
+
+		gs_out.barycentricCoords = vec4(bary[ii], 0.0);
+		SetTriAttribs(ii);
 
 		gl_Position = gl_in[ii].gl_Position;
 
@@ -168,23 +251,25 @@ void main(void)
 
 )glsl";
 
-static const char *fragmentShaderR3DQuads = R"glsl(
+static const char* fragmentShaderR3DQuads = R"glsl(
 
-#version 450 core
+#version 410 core
 
-uniform sampler2D tex1;			// base tex
-uniform sampler2D tex2;			// micro tex (optional)
+uniform usampler2D textureBank[2];			// entire texture sheet
 
 // texturing
 uniform bool	textureEnabled;
 uniform bool	microTexture;
-uniform float	microTextureScale;
-uniform vec2	baseTexSize;
+uniform float	microTextureMinLOD;
+uniform int		microTextureID;
+uniform ivec4	baseTexInfo;		// x/y are x,y positions in the texture sheet. z/w are with and height
+uniform int		baseTexType;
 uniform bool	textureInverted;
 uniform bool	textureAlpha;
 uniform bool	alphaTest;
 uniform bool	discardAlpha;
 uniform ivec2	textureWrapMode;
+uniform int		texturePage;
 
 // general
 uniform vec3	fogColour;
@@ -205,9 +290,12 @@ uniform float	fogStart;
 uniform float	fogAttenuation;
 uniform float	fogAmbient;
 uniform bool	fixedShading;
-uniform int		hardwareStep;
+uniform bool	smoothShading;
+uniform float	layerDepthBias;		// PRO-1000: >1.0 pulls layered polys towards the viewer (reverse z)
+uniform bool	step15Luminous;
+uniform int		colourLayer;
 
-// test
+// matrices (shared with vertex shader)
 uniform mat4	projMat;
 
 //interpolated inputs from geometry shader
@@ -215,109 +303,119 @@ uniform mat4	projMat;
 in GS_OUT
 {
 	noperspective vec2 v[4];
-	noperspective float area[4];
-	flat float oneOverW[4];
+	noperspective vec4 area;		// vec4s rather than float[4], each array element takes a whole input slot
+	flat vec4 oneOverW;
 
 	//our regular attributes
 	flat vec3	viewVertex[4];
 	flat vec3	viewNormal[4];		// per vertex normal vector
 	flat vec2	texCoord[4];
 	flat vec4	color;
-	flat float	fixedShade[4];
+	flat vec4	fixedShade;
+	flat float	LODBase;
+	vec4 barycentricCoords;
+
+	// the emitted vertex's own attributes, interpolated by the gpu across each triangle (triangles + edge fallback)
+	vec3	triViewVertex;
+	vec3	triViewNormal;
+	vec2	triTexCoord;
+	float	triFixedShade;
 } fs_in;
 
 //our calculated vertex attributes from the above
 vec3	fsViewVertex;
 vec3	fsViewNormal;
 vec2	fsTexCoord;
-float	fsFixedShade;
 vec4	fsColor;
+float	fsFixedShade;
+float	fsLODBase;
 
 //outputs
-out vec4 outColor;
+layout(location = 0) out vec4 out0;		// opaque
+layout(location = 1) out vec4 out1;		// trans layer 1
+layout(location = 2) out vec4 out2;		// trans layer 2
+
+// forward declarations (see common file)
+
+float CalcFog();
+void Step15Luminous(inout vec4 colour);
+vec4 GetTextureValue();
+void WriteOutputs(vec4 colour, int layer);
+float Sqr(float a);
+float SqrLength(vec2 a);
+void ComputeSpotlight(vec4 spotEllipse, vec2 spotRange, float viewZ, out float lobeEffect, out float lobeFogEffect);
 
 void QuadraticInterpolation()
 {
-	vec2 s[4];
-	float A[4];
-
-	for (int i=0; i<4; i++) {
-		s[i] = fs_in.v[i];
-		A[i] = fs_in.area[i];
-	}
-
-	float D[4];
-	float r[4];
-
-	for (int i=0; i<4; i++) {
-		int i_next = (i+1)%4;
-		D[i] = dot(s[i], s[i_next]);
-		r[i] = length(s[i]);
-		if (fs_in.oneOverW[i] < 0.0) {  // is w[i] negative?
-			r[i] = -r[i];
-		}
-	}
-
-	float t[4];
-
-	for (int i=0; i<4; i++) {
-		int i_next = (i+1)%4;
-		if(A[i]==0.0)	t[i] = 0.0;									// check for zero area + div by zero
-		else			t[i] = (r[i]*r[i_next] - D[i]) / A[i];
-	}
-
-	float uSum = 0.0;
-	float u[4];
-
-	for (uint i=0; i<4; i++) {
-		uint i_prev = (i-1)%4;
-		u[i] = (t[i_prev] + t[i]) / r[i];
-		uSum += u[i];
-	}
-
-	float lambda[4];
-
-	for (int i=0; i<4; i++) {
-		lambda[i] = u[i] / uSum;
-	}
-
-	/* Discard fragments when all the weights are neither all negative nor all positive. */
-
-	int lambdaSignCount = 0;
-
-	for (int i=0; i<4; i++) {
-		if (fs_in.oneOverW[i] * lambda[i] < 0.0) {
-			lambdaSignCount--;
-		} else {
-			lambdaSignCount++;
-		}
-	}
-	if (lambdaSignCount != 4) {
-		if(!gl_HelperInvocation) {
-			discard;
-		}
-	}
-
-	float interp_oneOverW = 0.0;
-
+	// init interpolated vertex attributes
 	fsViewVertex	= vec3(0.0);
 	fsViewNormal	= vec3(0.0);
 	fsTexCoord		= vec2(0.0);
 	fsFixedShade	= 0.0;
-	fsColor			= fs_in.color;
-	
-	for (int i=0; i<4; i++) {
-		fsViewVertex	+= lambda[i] * fs_in.viewVertex[i];
-		fsViewNormal	+= lambda[i] * fs_in.viewNormal[i];
-		fsTexCoord		+= lambda[i] * fs_in.texCoord[i];
-		fsFixedShade	+= lambda[i] * fs_in.fixedShade[i];
-		interp_oneOverW	+= lambda[i] * fs_in.oneOverW[i];
-	}
 
-	fsViewVertex	/= interp_oneOverW;
-	fsViewNormal	/= interp_oneOverW;
-	fsTexCoord		/= interp_oneOverW;
-	fsFixedShade	/= interp_oneOverW;
+	float interp_oneOverW	= 0.0;
+	float uSum				= 0.0;
+
+	const float hpFMin		= 0.00006103515625;		// half precision FLT_MIN
+	bool extreme_edge		= (fs_in.barycentricCoords.w > 0.5 || fs_in.barycentricCoords.x <= hpFMin || fs_in.barycentricCoords.z <= hpFMin); // w: triangle
+
+	// As the coordinates get closer to the poly edge the interpolated areas can approach zero which can blow up the maths leading to bad interpolation.
+	// On the edge the quad interpolation is linear along that edge, which is what the gpu's triangle interpolation gives there too,
+	// so in that case (and for triangles) we use the attributes the gpu interpolated, exactly as the triangle shader does.
+	// This code will only get triggered in rarer corner cases
+
+	if(extreme_edge)
+	{
+		fsViewVertex		= fs_in.triViewVertex;
+		fsViewNormal		= fs_in.triViewNormal;
+		fsTexCoord			= fs_in.triTexCoord;
+		fsFixedShade		= fs_in.triFixedShade;
+		interp_oneOverW		= gl_FragCoord.w;
+		uSum				= 1.0;
+	}
+	else
+	{
+		float u[4];
+		for (int i=0; i<4; i++)
+			u[i] = length(fs_in.v[i]) * sign(fs_in.oneOverW[i]); // is w[i] negative?
+
+		precise float t[4];
+		for (int i=0; i<4; i++) {
+			int i_next = (i+1)%4;
+			if(fs_in.area[i]==0.0) t[i] = 0.0; // check for zero area to avoid div by zero
+			else                   t[i] = fma(u[i],u[i_next], -dot(fs_in.v[i],fs_in.v[i_next])) / fs_in.area[i];
+		}
+
+		int lambdaSignCount = 0; // to discard fragments if all the weights are neither all negative nor all positive (=outside the convex/concave/crossed quad).
+
+		for (uint i=0; i<4; i++) {
+			uint i_prev = (i-1)%4;
+			u[i] = (t[i_prev] + t[i]) / u[i];
+			lambdaSignCount += (t[i_prev] < -t[i]) ? -1 : 1;
+		}
+
+		if (lambdaSignCount == 0) { // one can either check for == 0 or abs(...) != 4, both should(!) be equivalent (but in practice its not due to precision issues, but these cases are extremely rare)
+			discard;	// fine for helper invocations too: nothing here uses derivatives (textures are read with texelFetch)
+		}
+
+		for (int i=0; i<4; i++) {
+			interp_oneOverW	= fma(fs_in.oneOverW[i], u[i], interp_oneOverW);
+			uSum           += u[i];
+		}
+
+		for (int i=0; i<4; i++) {
+			fsViewVertex	= fma(fs_in.viewVertex[i], vec3(u[i]), fsViewVertex);
+			fsViewNormal	= fma(fs_in.viewNormal[i], vec3(u[i]), fsViewNormal);
+			fsTexCoord		= fma(fs_in.texCoord[i], vec2(u[i]), fsTexCoord);
+			fsFixedShade	= fma(fs_in.fixedShade[i], u[i], fsFixedShade);
+		}
+
+		float inv = 1.0/interp_oneOverW;
+		fsViewVertex *= inv;
+		fsViewNormal *= inv;
+		fsTexCoord   *= inv;
+		fsFixedShade *= inv;
+	}
 
 	vec4 vertex;
 	float depth;
@@ -334,196 +432,13 @@ void QuadraticInterpolation()
 	}
 	else {
 		vertex.z		= projMat[2][2] * fsViewVertex.z + projMat[3][2];		// standard projMat * vertex - but just using Z components
-		depth			= vertex.z * interp_oneOverW;
+		depth			= vertex.z * (interp_oneOverW/uSum);
 	}
 
-	gl_FragDepth = depth * 0.5 + 0.5;
-}
+	fsColor			= fs_in.color;
+	fsLODBase		= fs_in.LODBase;
 
-float mip_map_level(in vec2 texture_coordinate) // in texel units
-{
-    vec2  dx_vtc        = dFdx(texture_coordinate);
-    vec2  dy_vtc        = dFdy(texture_coordinate);
-    float delta_max_sqr = max(dot(dx_vtc, dx_vtc), dot(dy_vtc, dy_vtc));
-    float mml = 0.5 * log2(delta_max_sqr);
-    return max( 0.0, mml );
-}
-
-float LinearTexLocations(int wrapMode, float size, float u, out float u0, out float u1)
-{
-	float texelSize		= 1.0 / size;
-	float halfTexelSize	= 0.5 / size;
-
-	if(wrapMode==0) {							// repeat
-		u	= u * size - 0.5;
-		u0	= (floor(u) + 0.5) / size;			// + 0.5 offset added to push us into the centre of a pixel, without we'll get rounding errors
-		u0	= fract(u0);
-		u1	= u0 + texelSize;
-		u1	= fract(u1);
-
-		return fract(u);						// return weight
-	}
-	else if(wrapMode==1) {						// repeat + clamp
-		u	= fract(u);							// must force into 0-1 to start
-		u	= u * size - 0.5;
-		u0	= (floor(u) + 0.5) / size;			// + 0.5 offset added to push us into the centre of a pixel, without we'll get rounding errors
-		u1	= u0 + texelSize;
-
-		if(u0 <  0.0)	u0 = 0.0;
-		if(u1 >= 1.0)	u1 = 1.0 - halfTexelSize;
-		
-		return fract(u);						// return weight
-	}
-	else {										// mirror + mirror clamp - both are the same since the edge pixels are repeated anyway
-
-		float odd = floor(mod(u, 2.0));			// odd values are mirrored
-
-		if(odd > 0.0) {
-			u = 1.0 - fract(u);
-		}
-		else {
-			u = fract(u);
-		}
-
-		u	= u * size - 0.5;
-		u0	= (floor(u) + 0.5) / size;			// + 0.5 offset added to push us into the centre of a pixel, without we'll get rounding errors
-		u1	= u0 + texelSize;
-
-		if(u0 <  0.0)	u0 = 0.0;
-		if(u1 >= 1.0)	u1 = 1.0 - halfTexelSize;
-		
-		return fract(u);						// return weight
-	}
-}
-
-vec4 texBiLinear(sampler2D texSampler, float level, ivec2 wrapMode, vec2 texSize, vec2 texCoord)
-{
-	float tx[2], ty[2];
-	float a = LinearTexLocations(wrapMode.s, texSize.x, texCoord.x, tx[0], tx[1]);
-	float b = LinearTexLocations(wrapMode.t, texSize.y, texCoord.y, ty[0], ty[1]);
-	
-	vec4 p0q0 = textureLod(texSampler, vec2(tx[0],ty[0]), level);
-    vec4 p1q0 = textureLod(texSampler, vec2(tx[1],ty[0]), level);
-    vec4 p0q1 = textureLod(texSampler, vec2(tx[0],ty[1]), level);
-    vec4 p1q1 = textureLod(texSampler, vec2(tx[1],ty[1]), level);
-
-	if(alphaTest) {
-		if(p0q0.a > p1q0.a)		{ p1q0.rgb = p0q0.rgb; }
-		if(p0q0.a > p0q1.a)		{ p0q1.rgb = p0q0.rgb; }
-
-		if(p1q0.a > p0q0.a)		{ p0q0.rgb = p1q0.rgb; }
-		if(p1q0.a > p1q1.a)		{ p1q1.rgb = p1q0.rgb; }
-
-		if(p0q1.a > p0q0.a)		{ p0q0.rgb = p0q1.rgb; }
-		if(p0q1.a > p1q1.a)		{ p1q1.rgb = p0q1.rgb; }
-
-		if(p1q1.a > p0q1.a)		{ p0q1.rgb = p1q1.rgb; }
-		if(p1q1.a > p1q0.a)		{ p1q0.rgb = p1q1.rgb; }
-	}
-
-	// Interpolation in X direction.
-    vec4 pInterp_q0 = mix( p0q0, p1q0, a ); // Interpolates top row in X direction.
-    vec4 pInterp_q1 = mix( p0q1, p1q1, a ); // Interpolates bottom row in X direction.
-
-    return mix( pInterp_q0, pInterp_q1, b ); // Interpolate in Y direction.
-}
-
-vec4 textureR3D(sampler2D texSampler, ivec2 wrapMode, vec2 texSize, vec2 texCoord)
-{
-	float numLevels = floor(log2(min(texSize.x, texSize.y)));				// r3d only generates down to 1:1 for square textures, otherwise its the min dimension
-	float fLevel	= min(mip_map_level(texCoord * texSize), numLevels);
-
-	fLevel *= alphaTest ? 0.5 : 0.8;
-
-	float iLevel = floor(fLevel);						// value as an 'int'
-
-	vec2 texSize0 = texSize / exp2(iLevel);
-	vec2 texSize1 = texSize / exp2(iLevel+1.0);
-
-	vec4 texLevel0 = texBiLinear(texSampler, iLevel, wrapMode, texSize0, texCoord);
-	vec4 texLevel1 = texBiLinear(texSampler, iLevel+1.0, wrapMode, texSize1, texCoord);
-
-	return mix(texLevel0, texLevel1, fract(fLevel));	// linear blend between our mipmap levels
-}
-
-vec4 GetTextureValue()
-{
-	vec4 tex1Data = textureR3D(tex1, textureWrapMode, baseTexSize, fsTexCoord);
-
-	if(textureInverted) {
-		tex1Data.rgb = vec3(1.0) - vec3(tex1Data.rgb);
-	}
-
-	if (microTexture) {
-		vec2 scale			= (baseTexSize / 128.0) * microTextureScale;
-		vec4 tex2Data		= textureR3D( tex2, ivec2(0.0), vec2(128.0), fsTexCoord * scale);
-
-		float lod			= mip_map_level(fsTexCoord * scale * vec2(128.0));
-
-		float blendFactor	= max(lod - 1.5, 0.0);			// bias -1.5
-		blendFactor			= min(blendFactor, 1.0);		// clamp to max value 1
-		blendFactor			= blendFactor * 0.5 + 0.5;	    // 0.5 - 1 range
-
-		tex1Data			= mix(tex2Data, tex1Data, blendFactor);
-	}
-
-	if (alphaTest && (tex1Data.a < (32.0/255.0))) {
-		discard;
-	}
-
-	if(textureAlpha) {
-		if(discardAlpha) {					// opaque 1st pass
-			if (tex1Data.a < 1.0) {
-				discard;
-			}
-		}
-		else {								// transparent 2nd pass
-			if ((tex1Data.a * fsColor.a) >= 1.0) {
-				discard;
-			}
-		}
-	}
-
-	if (!textureAlpha) {
-		tex1Data.a = 1.0;
-	}
-
-	return tex1Data;
-}
-
-void Step15Luminous(inout vec4 colour)
-{
-	// luminous polys seem to behave very differently on step 1.5 hardware
-	// when fixed shading is enabled the colour is modulated by the vp ambient + fixed shade value
-	// when disabled it appears to be multiplied by 1.5, presumably to allow a higher range
-	if(hardwareStep==0x15) {
-		if(!lightEnabled && textureEnabled) {
-			if(fixedShading) {
-				colour.rgb *= 1.0 + fsFixedShade + lighting[1].y;
-			}
-			else {
-				colour.rgb *= 1.5;
-			}
-		}
-	}
-}
-
-float CalcFog()
-{
-	float z		= -fsViewVertex.z;
-	float fog	= fogIntensity * clamp(fogStart + z * fogDensity, 0.0, 1.0);
-
-	return fog;
-}
-
-float sqr(float a)
-{
-	return a*a;
-}
-
-float sqr_length(vec2 a)
-{
-	return a.x*a.x + a.y*a.y;
+	gl_FragDepth = depth * layerDepthBias;
 }
 
 void main()
@@ -543,45 +458,16 @@ void main()
 	}
 
 	colData = fsColor;
-	Step15Luminous(colData);			// no-op for step 2.0+	
+	Step15Luminous(colData);			// no-op for step 2.0+
 	finalData = tex1Data * colData;
 
-	if (finalData.a < (1.0/16.0)) {		// basically chuck out any totally transparent pixels value = 1/16 the smallest transparency level h/w supports
+	if (finalData.a < (1.0/32.0)) {		// basically chuck out any totally transparent pixels value = 1/16 the smallest transparency level h/w supports
 		discard;
 	}
 
-	float ellipse;
-	ellipse = sqr_length((gl_FragCoord.xy - spotEllipse.xy) / spotEllipse.zw); // decay rate = square of distance from center
-	ellipse = 1.0 - ellipse;      // invert
-	ellipse = max(0.0, ellipse);  // clamp
-
-	// Compute spotlight and apply lighting
-	float enable, absExtent, d, inv_r, range;
-
-	// start of spotlight
-	enable = step(spotRange.x, -fsViewVertex.z);
-
-	if (spotRange.y == 0.0) {
-		range = 0.0;
-	}
-	else {
-		absExtent = abs(spotRange.y);
-
-		d = spotRange.x + absExtent + fsViewVertex.z;
-		d = min(d, 0.0);
-
-		// slope of decay function
-		inv_r = 1.0 / (1.0 + absExtent);
-
-		// inverse-linear falloff
-		// Reference: https://imdoingitwrong.wordpress.com/2011/01/31/light-attenuation/
-		// y = 1 / (d/r + 1)^2
-		range = 1.0 / sqr(d * inv_r - 1.0);
-		range *= enable;
-	}
-
-	float lobeEffect = range * ellipse;
-	float lobeFogEffect = enable * ellipse;
+	float lobeEffect;
+	float lobeFogEffect;
+	ComputeSpotlight(spotEllipse, spotRange, fsViewVertex.z, lobeEffect, lobeFogEffect);
 
 	if (lightEnabled) {
 		vec3   lightIntensity;
@@ -603,14 +489,15 @@ void main()
 		sunFactor = clamp(sunFactor,-1.0,1.0);
 
 		// Optional clamping, value is allowed to be negative
-		if(sunClamp) {
+		// We suspect that translucent polygons are always clamped (e.g. lasers in Daytona 2)
+		if(sunClamp || finalData.a<0.999) {
 			sunFactor = max(sunFactor,0.0);
 		}
 
 		// Total light intensity: sum of all components 
 		lightIntensity = vec3(sunFactor*lighting[1].x + lighting[1].y);   // diffuse + ambient
 
-		lightIntensity.rgb += spotColor*lobeEffect;
+		lightIntensity += spotColor*lobeEffect;
 
 		// Upper clamp is optional, step 1.5+ games will drive brightness beyond 100%
 		if(intensityClamp) {
@@ -622,21 +509,28 @@ void main()
 		// for now assume fixed shading doesn't work with specular
 		if (specularEnabled) {
 
-			float exponent, NdotL, specularFactor;
-			vec4 biasIndex, expIndex, multIndex;
+			float specularFactor;
 
-			// Always clamp floor to zero, we don't want deep black areas
-			NdotL = max(0.0,sunFactor);
+			if (smoothShading)
+			{
+				// Always clamp floor to zero
+				float NdotL = max(0.0, sunFactor);
 
-			expIndex = vec4(8.0, 16.0, 32.0, 64.0);
-			multIndex = vec4(2.0, 2.0, 3.0, 4.0);
-			biasIndex = vec4(0.95, 0.95, 1.05, 1.0);
-			exponent = expIndex[int(shininess)] / biasIndex[int(shininess)];
+				const float expIndex[4]  = float[4](8.0, 16.0, 32.0, 64.0);
+				const float multIndex[4] = float[4](1.6, 1.6, 2.4, 3.2);
+				float exponent = expIndex[int(shininess)];
 
-			specularFactor = pow(NdotL, exponent);
-			specularFactor *= multIndex[int(shininess)];
-			specularFactor *= biasIndex[int(shininess)];
-			
+				specularFactor = pow(NdotL, exponent);
+				specularFactor *= multIndex[int(shininess)];
+			}
+			else
+			{
+				// flat shaded polys use Phong reflection model (R dot V) without any exponent or multiplier
+				// V = (0.0, 0.0, 1.0) is used by Model 3 as a fast approximation, so R dot V = R.z
+				vec3 R = reflect(-sunVector, fsViewNormal);
+				specularFactor = max(0.0, R.z);
+			}
+
 			specularFactor *= specularValue;
 			specularFactor *= lighting[1].x;
 
@@ -645,7 +539,7 @@ void main()
 				finalData.a = max(finalData.a, specularFactor);
 			}
 
-			finalData.rgb += vec3(specularFactor);
+			finalData.rgb += specularFactor;
 		}
 	}
 
@@ -655,11 +549,11 @@ void main()
 	// Spotlight on fog
 	vec3 lSpotFogColor = spotFogColor * fogAttenuation * fogColour.rgb * lobeFogEffect;
 
-	 // Fog & spotlight applied
+	// Fog & spotlight applied
 	finalData.rgb = mix(finalData.rgb, fogData.rgb + lSpotFogColor, fogData.a);
 
-	// Write output
-	outColor = finalData;	
+	// Write outputs to colour buffers
+	WriteOutputs(finalData,colourLayer);
 }
 )glsl";
 

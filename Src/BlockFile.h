@@ -30,6 +30,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include "Types.h"
 
 /*
@@ -64,7 +65,9 @@ public:
   /*
    * Read(value):
    *
-   * Reads a bool value from the current file position.
+   * Reads a bool value from the current file position. (There is no
+   * Read(bool *): a bool array would go to it, not to Read(T &), and only
+   * its first element would be read.)
    *
    * Parameters:
    *    value   Bool to read to.
@@ -72,7 +75,28 @@ public:
    * Returns:
    *    Number of bytes read. If not 1, an error occurred.
    */
-  unsigned Read(bool *value);
+  unsigned Read(bool& value);
+
+  /*
+   * Read(value):
+   *
+   * Reads a value from the current file position. Works for plain arrays too
+   * (the whole array is read), but not for pointers: use Read(data, numBytes)
+   * for the data a pointer points to.
+   *
+   * Parameters:
+   *    value   Variable to read to.
+   *
+   * Returns:
+   *    Number of bytes read
+   */
+  template<typename T>
+  unsigned Read(T& value)
+  {
+    static_assert(std::is_trivially_copyable<T>::value, "Read() only supports POD / trivially copyable types");
+    static_assert(!std::is_pointer<T>::value, "Read() would read the pointer itself: use Read(data, numBytes)");
+    return Read(static_cast<void*>(&value), static_cast<uint32_t>(sizeof(value)));
+  }
   
   /*
    * FindBlock(name):
@@ -123,6 +147,25 @@ public:
   void Write(const std::string &str);
 
   /*
+   * Write(value):
+   *
+   * Outputs POD data types, float, double, int etc. at the current file pointer
+   * position. Updates the block header appropriately. Works for plain arrays
+   * too (the whole array is written), but not for pointers: use
+   * Write(data, numBytes) for the data a pointer points to.
+   *
+   * Parameters:
+   *    value   Value to write.
+  */
+  template<typename T>
+  void Write(const T& value)
+  {
+    static_assert(std::is_trivially_copyable<T>::value, "Write() only supports POD / trivially copyable types");
+    static_assert(!std::is_pointer<T>::value, "Write() would write the pointer itself: use Write(data, numBytes)");
+    Write(static_cast<const void*>(&value), static_cast<uint32_t>(sizeof(value)));
+  }
+
+  /*
    * NewBlock(name, comment):
    *
    * Begins a new block. Writes the block header and sets the file pointer to
@@ -132,7 +175,7 @@ public:
    *    name      Block name. Must be unique and not NULL.
    *    comment   Comment string to embed in the block header.
    */
-  void NewBlock(const std::string &title, const std::string &comment);
+  void NewBlock(const std::string &name, const std::string &comment);
 
   /*
    * Create(file, headerName, comment):
