@@ -237,7 +237,7 @@ public:
 	 *		OKAY is successful, otherwise FAILED if a non-recoverable error
 	 *		occurred. Prints own error messages.
 	 */
-	bool Init(CIRQ *IRQObjectPtr);
+	Result Init(CIRQ *IRQObjectPtr);
 	 
 	/*
 	 * CTileGen(config):

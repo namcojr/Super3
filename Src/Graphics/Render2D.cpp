@@ -624,11 +624,11 @@ void CRender2D::AttachVRAM(const uint8_t *vramPtr)
 #define OFFSET_TOP_SURFACE    0             // 512*384*4 bytes
 #define OFFSET_BOTTOM_SURFACE (512*384*4)   // 512*384*4
 
-bool CRender2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes)
+Result CRender2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes)
 {
   // Load shaders
-  if (OKAY != LoadShaderProgram(&m_shaderProgram, &m_vertexShader, &m_fragmentShader, m_config["VertexShader2D"].ValueAs<std::string>(), m_config["FragmentShader2D"].ValueAs<std::string>(), s_vertexShaderSource, s_fragmentShaderSource))
-    return FAIL;
+  if (Result::OKAY != LoadShaderProgram(&m_shaderProgram, &m_vertexShader, &m_fragmentShader, m_config["VertexShader2D"].ValueAs<std::string>(), m_config["FragmentShader2D"].ValueAs<std::string>(), s_vertexShaderSource, s_fragmentShaderSource))
+    return Result::FAIL;
 
   // Get locations of the uniforms
   glUseProgram(m_shaderProgram);    // bind program
@@ -669,7 +669,7 @@ bool CRender2D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned
   }
 
   DebugLog("Render2D initialized (allocated %1.1f MB)\n", float(MEMORY_POOL_SIZE) / 0x100000);
-  return OKAY;
+  return Result::OKAY;
 }
 
 CRender2D::CRender2D(const Util::Config::Node &config)

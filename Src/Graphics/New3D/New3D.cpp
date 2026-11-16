@@ -81,7 +81,7 @@ void CNew3D::SetStepping(int stepping)
 	m_vbo.Create(GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW, sizeof(FVertex) * (MAX_RAM_VERTS + MAX_ROM_VERTS));
 }
 
-bool CNew3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam)
+Result CNew3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam)
 {
 	// Resolution and offset within physical display area
 	m_xRatio	= xRes * (float)(1.0 / 496.0);
@@ -116,7 +116,7 @@ bool CNew3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yR
 
 	glUseProgram(0);
 
-	return OKAY;	// OKAY ? wtf ..
+	return Result::OKAY;	// Result::OKAY ? wtf ..
 }
 
 void CNew3D::UploadTextures(unsigned level, unsigned x, unsigned y, unsigned width, unsigned height)

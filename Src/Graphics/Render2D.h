@@ -30,6 +30,7 @@
 
 #ifdef __ANDROID__
 #include <cstdint>
+#include "Types.h"
 #include <utility>
 #include <vector>
 namespace Util { namespace Config { class Node; } }
@@ -55,7 +56,7 @@ public:
   void AttachVRAM(const uint8_t *vramPtr);
   void AttachPalette(const uint32_t *palPtr[2]);
   void AttachRegisters(const uint32_t *regPtr);
-  bool Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes);
+  Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes);
 
   const uint32_t* GetFrameBufferARGB() const { return m_frame.data(); }
   const uint32_t* GetTopSurfaceARGB() const { return m_topSurface.data(); }
@@ -213,7 +214,7 @@ public:
    *    OKAY is successful, otherwise FAILED if a non-recoverable error
    *    occurred. Prints own error messages.
    */
-  bool Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes);
+  Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes);
    
   /*
    * CRender2D(config):

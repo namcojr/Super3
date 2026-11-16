@@ -109,7 +109,7 @@ void CJTAG::SaveState(CBlockFile *SaveState)
 
 void CJTAG::LoadState(CBlockFile *SaveState)
 {
-  if (OKAY != SaveState->FindBlock("JTAG"))
+  if (Result::OKAY != SaveState->FindBlock("JTAG"))
   {
     ErrorLog("Unable to load JTAG state. Save state file is corrupt.");
     return;

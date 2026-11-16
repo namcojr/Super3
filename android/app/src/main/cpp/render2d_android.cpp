@@ -150,7 +150,7 @@ void CRender2D::SetAndroidTileBlit(AndroidTileBlitFn fn)
   g_tileBlit = fn;
 }
 
-bool CRender2D::Init(unsigned /*xOffset*/, unsigned /*yOffset*/, unsigned xRes, unsigned yRes, unsigned /*totalXRes*/, unsigned /*totalYRes*/)
+Result CRender2D::Init(unsigned /*xOffset*/, unsigned /*yOffset*/, unsigned xRes, unsigned yRes, unsigned /*totalXRes*/, unsigned /*totalYRes*/)
 {
   // Use the core's nominal resolution if present, but fall back to known TG size.
   m_xPixels = (xRes != 0) ? xRes : 496;
@@ -165,7 +165,7 @@ bool CRender2D::Init(unsigned /*xOffset*/, unsigned /*yOffset*/, unsigned xRes, 
   m_topSurface.assign(m_xPixels * m_yPixels, 0);
   m_bottomSurface.assign(m_xPixels * m_yPixels, 0);
   m_frame.assign(m_xPixels * m_yPixels, ARGB(0xFF, 0, 0, 0));
-  return true;
+  return Result::OKAY;
 }
 
 void CRender2D::AttachRegisters(const uint32_t *regPtr) { m_regs = regPtr; }

@@ -10,7 +10,7 @@
 class GlesStubRender3D final : public IRender3D
 {
 public:
-  bool Init(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) override { return true; }
+  Result Init(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) override { return Result::OKAY; }
   void AttachMemory(const uint32_t*, const uint32_t*, const uint32_t*, const uint32_t*, const uint16_t*) override {}
   void UploadTextures(unsigned, unsigned, unsigned, unsigned, unsigned) override {}
   void SetStepping(int) override {}

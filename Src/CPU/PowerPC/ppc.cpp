@@ -1,7 +1,7 @@
 /**
  ** Supermodel
  ** A Sega Model 3 Arcade Emulator.
- ** Copyright 2011 Bart Trzynadlowski, Nik Henson
+ ** Copyright 2003-2026 The Supermodel Team
  **
  ** This file is part of Supermodel.
  **
@@ -31,6 +31,10 @@
 #include "ppc.h"
 
 #include <cstring>	// memset()
+#include <climits>
+#include <algorithm>	// std::min()
+
+#define DEC_TRIGGER_NONE	INT_MIN		// the decrementer does not pass zero in this time slice
 #include "Supermodel.h"
 #include "CPU/Bus.h"
 
@@ -117,12 +121,12 @@ static UINT32		ppc_field_xlat[256];
 
 
 
-#define BITMASK_0(n)	(UINT32)(((UINT64)1 << n) - 1)
-#define CRBIT(x)		((ppc.cr[x / 4] & (1 << (3 - (x % 4)))) ? 1 : 0)
+#define BITMASK_0(n)	(UINT32)(((UINT64)1 << (n)) - 1)
+#define CRBIT(x)		((ppc.cr[(x) / 4] & (1 << (3 - ((x) % 4)))) ? 1 : 0)
 #define _BIT(n)			(1 << (n))
 #define GET_ROTATE_MASK(mb,me)		(ppc_rotate_mask[mb][me])
-#define ADD_CA(r,a,b)		((UINT32)r < (UINT32)a)
-#define SUB_CA(r,a,b)		(!((UINT32)a < (UINT32)b))
+#define ADD_CA(r,a,b)		((UINT32)(r) < (UINT32)(a))
+#define SUB_CA(r,a,b)		(!((UINT32)(a) < (UINT32)(b)))
 #define ADD_OV(r,a,b)		((~((a) ^ (b)) & ((a) ^ (r))) & 0x80000000)
 #define SUB_OV(r,a,b)		(( ((a) ^ (b)) & ((a) ^ (r))) & 0x80000000)
 
@@ -154,8 +158,8 @@ static UINT32		ppc_field_xlat[256];
 #define TSR_ENW			0x80000000
 #define TSR_WIS			0x40000000
 
-#define BYTE_REVERSE16(x)	(((x >> 8) | (x << 8)) & 0xFFFF)
-#define BYTE_REVERSE32(x)	((x >> 24) | ((x << 8) & 0x00FF0000) | ((x >> 8) & 0x0000FF00) | (x << 24))
+#define BYTE_REVERSE16(x)	((((x) >> 8) | ((x) << 8)) & 0xFFFF)
+#define BYTE_REVERSE32(x)	(((x) >> 24) | (((x) << 8) & 0x00FF0000) | (((x) >> 8) & 0x0000FF00) | ((x) << 24))
 
 typedef union {
 	UINT64	id;
@@ -257,12 +261,13 @@ typedef struct {
 	UINT32 timer_frac;
 	int tb_base_icount;
 	int dec_base_icount;
-	int dec_trigger_cycle;
+	int dec_trigger_cycle;		// icount at which the decrementer passes zero, DEC_TRIGGER_NONE if not in this time slice
 	
 	// Cycle related
 	UINT64 total_cycles;
 	int icount;
 	int cur_cycles;
+	int overrun;				// cycles the last time slice ran past its end (see ppc_add_cycles), taken from the next one
 	int bus_freq_multiplier;
 	int cycles_per_second;
 
@@ -289,23 +294,25 @@ static UINT32 ppc_rotate_mask[32][32];
 
 static void ppc_change_pc(UINT32 newpc)
 {
-	if (ppc.cur_fetch.start <= newpc && newpc <= ppc.cur_fetch.end)
+	UINT32 offset	= newpc - ppc.cur_fetch.start;		//  unsigned wrap around can happen, that's defined behavour 
+	UINT32 range	= ppc.cur_fetch.end - ppc.cur_fetch.start;
+
+	if (offset <= range)
 	{
-		ppc.op = &ppc.cur_fetch.ptr[(newpc-ppc.cur_fetch.start)/4];
-//		ppc.op = (UINT32 *)((void *)ppc.cur_fetch.ptr + (UINT32)(newpc - ppc.cur_fetch.start));
+		ppc.op = &ppc.cur_fetch.ptr[offset / 4];
 		return;
 	}
 
-	for(UINT i = 0; ppc.fetch[i].ptr != NULL; i++)
+	for(UINT32 i = 0; ppc.fetch[i].ptr != NULL; i++)
 	{
-		if (ppc.fetch[i].start <= newpc && newpc <= ppc.fetch[i].end)
-		{
-			ppc.cur_fetch.start = ppc.fetch[i].start;
-			ppc.cur_fetch.end = ppc.fetch[i].end;
-			ppc.cur_fetch.ptr = ppc.fetch[i].ptr;
+		offset	= newpc - ppc.fetch[i].start;
+		range	= ppc.fetch[i].end - ppc.fetch[i].start;
 
-//			ppc.op = (UINT32 *)((UINT32)ppc.cur_fetch.ptr + (UINT32)(newpc - ppc.cur_fetch.start));
-			ppc.op = &ppc.cur_fetch.ptr[(newpc-ppc.cur_fetch.start)/4];			
+		if (offset <= range)
+		{
+			ppc.cur_fetch = ppc.fetch[i];
+
+			ppc.op = &ppc.cur_fetch.ptr[offset / 4];
 			return;
 		}
 	}
@@ -417,7 +424,7 @@ static inline UINT32 check_condition_code(UINT32 bo, UINT32 bi)
 	UINT32 bo2 = (bo & 0x04) ? 1 : 0;
 	UINT32 bo3 = (bo & 0x02) ? 1 : 0;
 
-	if( bo2 == 0 )
+	if (bo2 == 0)
 		--CTR;
 
 	UINT32 ctr_ok = bo2 | ((CTR != 0) ^ bo3);
@@ -478,7 +485,7 @@ static inline void write_decrementer(UINT32 value)
 	if ((UINT32)(ppc.dec_base_icount / ppc.timer_ratio) > DEC)
 		ppc.dec_trigger_cycle = ppc.dec_base_icount - ((1 + DEC) * ppc.timer_ratio);
 	else
-		ppc.dec_trigger_cycle = 0x7fffffff;
+		ppc.dec_trigger_cycle = DEC_TRIGGER_NONE;
 }
 
 /*********************************************************************/
@@ -638,18 +645,6 @@ static inline UINT32 ppc_get_msr(void)
 	return MSR;
 }
 
-static inline void ppc_set_cr(UINT32 value)
-{
-	CR(0) = (value >> 28) & 0xf;
-	CR(1) = (value >> 24) & 0xf;
-	CR(2) = (value >> 20) & 0xf;
-	CR(3) = (value >> 16) & 0xf;
-	CR(4) = (value >> 12) & 0xf;
-	CR(5) = (value >> 8) & 0xf;
-	CR(6) = (value >> 4) & 0xf;
-	CR(7) = (value >> 0) & 0xf;
-}
-
 static inline UINT32 ppc_get_cr(void)
 {
 	return CR(0) << 28 | CR(1) << 24 | CR(2) << 20 | CR(3) << 16 | CR(4) << 12 | CR(5) << 8 | CR(6) << 4 | CR(7);
@@ -714,10 +709,9 @@ void ppc_base_init(void)
 	/* Calculate rotate mask table */
 	for( i=0; i < 32; i++ ) {
 		for( j=0; j < 32; j++ ) {
-			UINT32 mask;
 			int mb = i;
 			int me = j;
-			mask = ((UINT32)0xFFFFFFFF >> mb) ^ ((me >= 31) ? 0 : ((UINT32)0xFFFFFFFF >> (me + 1)));
+			UINT32 mask = ((UINT32)0xFFFFFFFF >> mb) ^ ((me >= 31) ? 0 : ((UINT32)0xFFFFFFFF >> (me + 1)));
 			if( mb > me )
 				mask = ~mask;
 
@@ -919,6 +913,13 @@ void ppc_attach_bus(IBus *BusPtr)
 	Bus = BusPtr;
 }
 
+void ppc_set_idle_skip(UINT32 ramSize)
+{
+	idleRAMSize = idleRAMSizeSaved = ramSize;
+	idleLoopPC = 0;
+	idleLoopPasses = 0;
+}
+
 void ppc_save_state(CBlockFile *SaveState)
 {
 	SaveState->NewBlock("PowerPC", __FILE__);
@@ -996,7 +997,7 @@ void ppc_save_state(CBlockFile *SaveState)
 
 void ppc_load_state(CBlockFile *SaveState)
 {	
-	if (OKAY != SaveState->FindBlock("PowerPC"))
+	if (Result::OKAY != SaveState->FindBlock("PowerPC"))
 	{
 		ErrorLog("Unable to load PowerPC state. Save state file is corrupt.");
 		return;
@@ -1067,6 +1068,7 @@ void ppc_load_state(CBlockFile *SaveState)
 	
 	SaveState->Read(&ppc.dec, sizeof(ppc.dec));
 	SaveState->Read(&ppc.timer_frac, sizeof(ppc.timer_frac));
+	ppc.overrun = 0;	// not saved: at most a few hundred cycles, and older states stay compatible
 	SaveState->Read(&ppc.fpscr, sizeof(ppc.fpscr));
 	
 	SaveState->Read(ppc.fpr, sizeof(ppc.fpr));
@@ -1109,6 +1111,7 @@ void ppc_attach_debugger(Debugger::CPPCDebug *PPCDebugPtr)
 		ppc_detach_debugger();
 	PPCDebug = PPCDebugPtr;
 	Bus = PPCDebug->AttachBus(Bus);
+	idleRAMSize = 0;	// breakpoints and stepping need every instruction executed
 }
 
 void ppc_detach_debugger()
@@ -1117,6 +1120,7 @@ void ppc_detach_debugger()
 		return;
 	Bus = PPCDebug->DetachBus(); 
 	PPCDebug = NULL;
+	idleRAMSize = idleRAMSizeSaved;
 }
 
 void ppc_break()

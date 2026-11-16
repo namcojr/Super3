@@ -575,16 +575,16 @@ static bool IsDynamicModel(const UINT32 *data)
  * Draw the specified model (adds it to the display list). This is where vertex
  * buffer overflows and display list overflows will be detected. An attempt is
  * made to salvage the situation if this occurs, so if DrawModel() returns
- * FAIL, it is a serious matter and rendering should be aborted for the frame.
+ * Result::FAIL, it is a serious matter and rendering should be aborted for the frame.
  *
  * Models are cached for each unique culling node texture offset state.
  */
-bool CLegacy3D::DrawModel(UINT32 modelAddr)
+Result CLegacy3D::DrawModel(UINT32 modelAddr)
 {  
   //if (modelAddr==0x7FFF00)  // Fighting Vipers (this is not polygon data!)
   //  return;
   if (modelAddr == 0x200000)  // Virtual On 2 (during boot-up, causes slow-down)
-    return OKAY;
+    return Result::OKAY;
   const UINT32 *model = TranslateModelAddress(modelAddr);
   
   // Determine whether model is in polygon RAM or VROM
@@ -1089,7 +1089,7 @@ void CLegacy3D::SetStepping(int stepping)
   DebugLog("Legacy3D set to Step %d.%d\n", (step>>4)&0xF, step&0xF);
 }
   
-bool CLegacy3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam)
+Result CLegacy3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXResParam, unsigned totalYResParam)
 {
   // Allocate memory for texture buffer
   textureBuffer = new(std::nothrow) GLfloat[1024*1024*4];
@@ -1099,10 +1099,10 @@ bool CLegacy3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned
   glGetError(); // clear error flag
   
   // Create model caches and VBOs
-  if (CreateModelCache(&VROMCache, NUM_STATIC_VERTS, NUM_LOCAL_VERTS, NUM_STATIC_MODELS, 0x4000000/4, NUM_DISPLAY_LIST_ITEMS, false))
-    return FAIL;
-  if (CreateModelCache(&PolyCache, NUM_DYNAMIC_VERTS, NUM_LOCAL_VERTS, NUM_DYNAMIC_MODELS, 0x4000000/4, NUM_DISPLAY_LIST_ITEMS, true))
-    return FAIL;
+  if (CreateModelCache(&VROMCache, NUM_STATIC_VERTS, NUM_LOCAL_VERTS, NUM_STATIC_MODELS, 0x4000000/4, NUM_DISPLAY_LIST_ITEMS, false) != Result::OKAY)
+    return Result::FAIL;
+  if (CreateModelCache(&PolyCache, NUM_DYNAMIC_VERTS, NUM_LOCAL_VERTS, NUM_DYNAMIC_MODELS, 0x4000000/4, NUM_DISPLAY_LIST_ITEMS, true) != Result::OKAY)
+    return Result::FAIL;
 
   // Initialize lighting parameters (updated as viewports are traversed)
   lightingParams[0] = 0.0;
@@ -1155,8 +1155,8 @@ bool CLegacy3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned
 
   // Load shaders, using multi-sheet shader if requested.
   const char *fragmentShaderSource = (m_config["MultiTexture"].ValueAs<bool>() ? fragmentShaderMultiSheetSource : fragmentShaderSingleSheetSource); // single texture shader
-  if (OKAY != LoadShaderProgram(&shaderProgram,&vertexShader,&fragmentShader,m_config["VertexShader"].ValueAs<std::string>(),m_config["FragmentShader"].ValueAs<std::string>(),vertexShaderSource,fragmentShaderSource))
-    return FAIL;
+  if (Result::OKAY != LoadShaderProgram(&shaderProgram,&vertexShader,&fragmentShader,m_config["VertexShader"].ValueAs<std::string>(),m_config["FragmentShader"].ValueAs<std::string>(),vertexShaderSource,fragmentShaderSource))
+    return Result::FAIL;
   
   // Try locating default "textureMap" uniform in shader program
   glUseProgram(shaderProgram); // bind program
@@ -1293,7 +1293,7 @@ bool CLegacy3D::Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned
   UploadTextures(0, 0, 0, 2048, 2048);
 
   DebugLog("Legacy3D initialized\n");
-  return OKAY;
+  return Result::OKAY;
 }
 
 void CLegacy3D::SetSunClamp(bool enable)

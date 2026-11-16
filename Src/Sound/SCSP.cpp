@@ -604,7 +604,7 @@ void SCSP_StopSlot(_SLOT *slot,int keyoff)
 
 //#define log2(n) (log((float) n)/log((float) 2))
 
-bool SCSP_Init(const Util::Config::Node &config, int n)
+Result SCSP_Init(const Util::Config::Node &config, int n)
 {
 	s_config = &config;
 	try {
@@ -811,7 +811,7 @@ bool SCSP_Init(const Util::Config::Node &config, int n)
 		return ErrorLog("Unable to create MIDI mutex!");
 	}
 	
-	return OKAY;
+	return Result::OKAY;
 }
 
 void SCSP_SetRAM(int n,unsigned char *r)
@@ -2060,7 +2060,7 @@ void SCSP_SaveState(CBlockFile *StateFile)
 
 void SCSP_LoadState(CBlockFile *StateFile)
 {
-	if (OKAY != StateFile->FindBlock("SCSP x 2"))
+	if (Result::OKAY != StateFile->FindBlock("SCSP x 2"))
 	{
 		ErrorLog("Unable to load SCSP state. Save state file is corrupt.");
 		return;

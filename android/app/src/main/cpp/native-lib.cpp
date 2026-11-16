@@ -130,10 +130,10 @@ public:
       m_inner->SetStepping(stepping);
   }
 
-  bool Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes) override
+  Result Init(unsigned xOffset, unsigned yOffset, unsigned xRes, unsigned yRes, unsigned totalXRes, unsigned totalYRes) override
   {
     if (!m_inner)
-      return true;
+      return Result::FAIL;  // was "true" == FAIL (1) under the old OKAY/FAIL defines
     return m_inner->Init(xOffset, yOffset, xRes, yRes, totalXRes, totalYRes);
   }
 
@@ -170,7 +170,7 @@ public:
   void UploadTextures(unsigned, unsigned, unsigned, unsigned, unsigned) override {}
   void AttachMemory(const uint32_t*, const uint32_t*, const uint32_t*, const uint32_t*, const uint16_t*) override {}
   void SetStepping(int) override {}
-  bool Init(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) override { return true; }
+  Result Init(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned) override { return Result::OKAY; }
   void SetSunClamp(bool) override {}
   void SetSignedShade(bool) override {}
   float GetLosValue(int) override { return 0.0f; }
@@ -273,9 +273,9 @@ struct Super3Host {
       return;
 
     CBlockFile nv;
-    if (OKAY != nv.Load(filePath))
+    if (Result::OKAY != nv.Load(filePath))
       return;
-    if (OKAY != nv.FindBlock("Supermodel NVRAM State"))
+    if (Result::OKAY != nv.FindBlock("Supermodel NVRAM State"))
       return;
 
     int32_t fileVersion = -1;
@@ -302,7 +302,7 @@ struct Super3Host {
     }
 
     CBlockFile nv;
-    if (OKAY != nv.Create(filePath, "Supermodel NVRAM State", "Super3 Android NVRAM"))
+    if (Result::OKAY != nv.Create(filePath, "Supermodel NVRAM State", "Super3 Android NVRAM"))
       return;
 
     nv.Write(&NVRAM_FILE_VERSION, sizeof(NVRAM_FILE_VERSION));
@@ -649,13 +649,13 @@ struct Super3Host {
       // Most of the legacy core uses OKAY=0 / FAIL=1 semantics even when the
       // return type is bool. Treat non-zero as failure.
       SDL_Log("Model3 Init...");
-      if (model3->Init() != 0) {
+      if (model3->Init() != Result::OKAY) {
         ErrorLog("Model3 Init failed");
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Model3 Init failed");
         return false;
       }
       SDL_Log("Model3 LoadGame...");
-      if (model3->LoadGame(game, roms) != 0) {
+      if (model3->LoadGame(game, roms) != Result::OKAY) {
         ErrorLog("Model3 LoadGame failed");
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Model3 LoadGame failed");
         return false;
@@ -809,7 +809,7 @@ struct Super3Host {
       }
 
       CBlockFile SaveState;
-      if (OKAY != SaveState.Create(filePath, "Supermodel Save State", "Supermodel Version " SUPERMODEL_VERSION))
+      if (Result::OKAY != SaveState.Create(filePath, "Supermodel Save State", "Supermodel Version " SUPERMODEL_VERSION))
       {
         ErrorLog("Unable to save state to '%s'.", filePath.c_str());
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to save state to '%s'.", filePath.c_str());
@@ -831,14 +831,14 @@ struct Super3Host {
 
       const std::string filePath = SaveStatePath();
       CBlockFile SaveState;
-      if (OKAY != SaveState.Load(filePath))
+      if (Result::OKAY != SaveState.Load(filePath))
       {
         ErrorLog("Unable to load state from '%s'.", filePath.c_str());
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Unable to load state from '%s'.", filePath.c_str());
         return;
       }
 
-      if (OKAY != SaveState.FindBlock("Supermodel Save State"))
+      if (Result::OKAY != SaveState.FindBlock("Supermodel Save State"))
       {
         ErrorLog("'%s' does not appear to be a valid save state file.", filePath.c_str());
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "'%s' does not appear to be a valid save state file.", filePath.c_str());
@@ -873,7 +873,7 @@ struct Super3Host {
     SDL_Log("Initializing New3D (GLES) ...");
     SDL_Log("New3DAccurate=%d", config["New3DAccurate"].ValueAsDefault<bool>(false) ? 1 : 0);
     new3d = std::make_unique<New3D::CNew3D>(config, game.name);
-    if (new3d->Init(xOff, yOff, xRes, yRes, totalXRes, totalYRes) != 0)
+    if (new3d->Init(xOff, yOff, xRes, yRes, totalXRes, totalYRes) != Result::OKAY)
     {
       SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "New3D Init failed");
       new3d.reset();
@@ -1237,7 +1237,7 @@ extern "C" int SDL_main(int argc, char* argv[]) {
       if (!audioOpened) {
         audioOpened = true;
         SetAudioType(host.game.audio);
-        if (!OpenAudio(host.config)) {
+        if (OpenAudio(host.config) != Result::OKAY) {
           SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "OpenAudio failed (continuing without audio)");
         }
       }

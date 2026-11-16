@@ -169,10 +169,10 @@ static INT16 Clamp16(int sample)
   return static_cast<INT16>(sample);
 }
 
-bool OpenAudio(const Util::Config::Node&)
+Result OpenAudio(const Util::Config::Node&)
 {
   if (g_audioDevice != 0)
-    return true;
+    return Result::OKAY;
 
   SDL_AudioSpec desired{};
   desired.freq = 48000; // common Android output rate; SDL may still choose a different one
@@ -205,7 +205,7 @@ bool OpenAudio(const Util::Config::Node&)
                                       SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_FORMAT_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE);
   if (g_audioDevice == 0) {
     SDL_LogError(SDL_LOG_CATEGORY_AUDIO, "SDL_OpenAudioDevice failed: %s", SDL_GetError());
-    return false;
+    return Result::FAIL;
   }
 
   g_bytesPerSecond = static_cast<uint32_t>(g_audioSpec.freq) *
@@ -224,7 +224,7 @@ bool OpenAudio(const Util::Config::Node&)
     SDL_CloseAudioDevice(g_audioDevice);
     g_audioDevice = 0;
     g_ring.clear();
-    return false;
+    return Result::FAIL;
   }
 
   // Convert from core mix format (S16 stereo @ 44100) to device format.
@@ -236,11 +236,11 @@ bool OpenAudio(const Util::Config::Node&)
     g_ring.clear();
     SDL_DestroyMutex(g_audioMutex);
     g_audioMutex = nullptr;
-    return false;
+    return Result::FAIL;
   }
 
   SDL_PauseAudioDevice(g_audioDevice, 0);
-  return true;
+  return Result::OKAY;
 }
 
 bool OutputAudio(unsigned numSamples, INT16* leftFront, INT16* rightFront, INT16* leftRear, INT16* rightRear, bool flipStereo)
