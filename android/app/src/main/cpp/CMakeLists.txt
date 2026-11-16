@@ -32,7 +32,7 @@ endforeach()
 # Src/ is an unmodified copy of upstream Supermodel (see Scripts/sync-upstream.sh).
 # Android-specific code lives in this directory:
 #   override/   headers that replace upstream desktop-OpenGL headers (searched first)
-#   New3D/      SUPER3's OpenGL ES port of the New3D renderer
+#   generated/  files made by Scripts/sync-upstream.sh (patched upstream copies, tables)
 
 file(GLOB_RECURSE SUPER3_SOURCES
   "${REPO_ROOT}/Src/*.cpp"
@@ -45,6 +45,10 @@ list(FILTER SUPER3_SOURCES EXCLUDE REGEX
   "/Src/(Graphics|Debugger|Model1|Model2|Pro1000)/|/Src/OSD/(SDL|Windows|OSX|Unix)/|/Src/OSD/(ConsoleInput|Test_[^/]*)\\.cpp$|/Src/Pkgs/(GL|imgui)/|/Src/Pkgs/glew\\.c$|/Src/CPU/(V60|SHARC|I960|MB86233|MB86235)/|/Src/CPU/68K/Musashi/(m68k_in|m68kmake)\\.c$|/Src/CPU/68K/Turbo68K/|/Src/CPU/PowerPC/(ppc603|ppc_ops)\\.c$|/Src/CPU/PowerPC/PPCDisasm\\.cpp$|/Src/Model3/(53C810Disasm|Model3GraphicsState)\\.cpp$|/Src/Sound/SCSPLFO\\.cpp$|/Src/Sound/MultiPCM\\.cpp$|/Src/Util/Test_[^/]*$")
 
 file(GLOB UPSTREAM_NEW3D_SOURCES "${REPO_ROOT}/Src/Graphics/New3D/*.cpp")
+# New3D.cpp and TextureBank.cpp are built from patched copies made by
+# Scripts/sync-upstream.sh (steps 6 and 7)
+list(FILTER UPSTREAM_NEW3D_SOURCES EXCLUDE REGEX "/(New3D|TextureBank)\\.cpp$")
+list(APPEND UPSTREAM_NEW3D_SOURCES "${M68K_GENERATED_DIR}/New3D_android.cpp" "${M68K_GENERATED_DIR}/TextureBank_android.cpp")
 
 # --- SDL2 (for future Android OSD wiring) ---
 # Prefer a local checkout if provided via -DSDL2_LOCAL_DIR, otherwise fetch the
@@ -98,7 +102,7 @@ add_library(super3 SHARED
   # Upstream's New3D renderer, built for OpenGL ES 3.2 through override/GL/glew.h
   "${REPO_ROOT}/Src/Graphics/Shader.cpp"
   ${UPSTREAM_NEW3D_SOURCES}
-  "${REPO_ROOT}/Src/OSD/SDL/Audio.cpp"
+  "${M68K_GENERATED_DIR}/Audio_android.cpp"
   "${REPO_ROOT}/Src/OSD/Unix/FileSystemPath.cpp"
   "${M68K_GENERATED_DIR}/UpstreamDefaultConfig.cpp"
   ${SUPER3_SOURCES}

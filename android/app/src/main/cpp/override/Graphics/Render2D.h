@@ -57,6 +57,14 @@ private:
   GLuint m_textureIDs[2] = { 0, 0 };
   GLSLShader m_drawShader;
   std::shared_ptr<TileGenBuffer> m_drawBuffers[2];
+
+  // SUPER3 widescreen: when the top layer covers the whole 4:3 picture (logos,
+  // intermissions), the side bars show its edge colours instead of 3D leftovers
+  void UpdateSideBars();
+  void DrawSideBars();
+  bool  m_coverSides = false;
+  int   m_sideFrames = 0;       // frames the opposite state has been seen
+  float m_sideColour[2][3] = {};  // left, right (RGB 0..1)
 };
 
 #endif  // INCLUDED_RENDER2D_H

@@ -4,13 +4,17 @@
  * Mirrors upstream behaviour line for line and compiles upstream's own 2D
  * shaders (Src/Graphics/Shaders2D.h; converted to GLSL ES by gles_compat.cpp),
  * so upstream shader changes (upscale filters etc.) come with every sync.
+ *
+ * SUPER3 addition: side bars in widescreen mode (UpdateSideBars/DrawSideBars).
  */
 
 #include "Graphics/Render2D.h"
 #include "Graphics/Shaders2D.h"
 #include "OSD/Logger.h"
 
+#include <algorithm>
 #include <string>
+#include <unordered_map>
 
 void CRender2D::Setup2D(bool isBottom)
 {
@@ -59,6 +63,85 @@ void CRender2D::PreRenderFrame(void)
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 496, 384, GL_RGBA, GL_UNSIGNED_BYTE, m_drawBuffers[i]->data);
   }
   glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+  UpdateSideBars();
+}
+
+// Tile layer pixels are 0xAABBGGRR (uploaded as RGBA bytes); 496x384 visible, rows 512 apart.
+void CRender2D::UpdateSideBars()
+{
+  // Switch only after 3 frames in the new state, so single-frame transitions don't flash
+  auto settle = [this](bool cover) {
+    m_sideFrames = (cover == m_coverSides) ? 0 : m_sideFrames + 1;
+    if (m_sideFrames >= 3)
+    {
+      m_coverSides = cover;
+      m_sideFrames = 0;
+      DebugLog("Widescreen side bars: %s\n", cover ? "edge colour (4:3 picture)" : "3D");
+    }
+  };
+  const auto& top = m_drawBuffers[1];
+  if (!top || !m_config["WideScreen"].ValueAsDefault<bool>(false))
+  {
+    m_coverSides = false;
+    return;
+  }
+
+  // Fully opaque top layer? (sampled every 4 pixels; the 3D image can't be seen through it)
+  unsigned samples = 0, opaque = 0;
+  for (int y = 0; y < 384; y += 4)
+    for (int x = 0; x < 496; x += 4, samples++)
+      opaque += (top->data[y * 512 + x] >> 24) == 0xFF;
+  if (opaque * 1000 < samples * 995)
+  {
+    settle(false);
+    return;
+  }
+
+  // Most common colour of each edge column
+  for (int side = 0; side < 2; side++)
+  {
+    const int x = side ? 495 : 0;
+    std::unordered_map<uint32_t, int> count;
+    uint32_t best = 0;
+    int bestCount = 0;
+    for (int y = 0; y < 384; y++)
+    {
+      const uint32_t c = top->data[y * 512 + x] & 0xFFFFFF;
+      if (++count[c] > bestCount) { bestCount = count[c]; best = c; }
+    }
+    m_sideColour[side][0] = (best & 0xFF) / 255.0f;
+    m_sideColour[side][1] = ((best >> 8) & 0xFF) / 255.0f;
+    m_sideColour[side][2] = ((best >> 16) & 0xFF) / 255.0f;
+  }
+  settle(true);
+}
+
+void CRender2D::DrawSideBars()
+{
+  const int left = (int)m_xOffset - (int)m_correction;  // where the top layer starts (see Setup2D)
+  const int right = left + (int)m_xPixels;
+  if (left <= 0 && right >= (int)m_totalXPixels)
+    return;
+
+  GLint box[4];
+  glGetIntegerv(GL_SCISSOR_BOX, box);
+  const GLboolean scissorOn = glIsEnabled(GL_SCISSOR_TEST);
+  glEnable(GL_SCISSOR_TEST);
+  if (left > 0)
+  {
+    glScissor(0, 0, left, m_totalYPixels);
+    glClearColor(m_sideColour[0][0], m_sideColour[0][1], m_sideColour[0][2], 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
+  if (right < (int)m_totalXPixels)
+  {
+    glScissor(right, 0, m_totalXPixels - right, m_totalYPixels);
+    glClearColor(m_sideColour[1][0], m_sideColour[1][1], m_sideColour[1][2], 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+  }
+  glScissor(box[0], box[1], box[2], box[3]);
+  if (!scissorOn)
+    glDisable(GL_SCISSOR_TEST);
 }
 
 void CRender2D::RenderFrameBottom(void)
@@ -69,6 +152,8 @@ void CRender2D::RenderFrameBottom(void)
 
 void CRender2D::RenderFrameTop(void)
 {
+  if (m_coverSides)
+    DrawSideBars();
   Setup2D(false);
   DrawSurface(m_textureIDs[1]);
 }

@@ -23,6 +23,10 @@ void Super3GLES_CompileShader(GLuint shader);
 void Super3GLES_ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void* pixels);
 // ES has only glDrawBuffers, and buffer i must be GL_COLOR_ATTACHMENTi or GL_NONE
 void Super3GLES_DrawBuffer(GLenum buf);
+// While enabled, glBufferSubData writes without waiting for the GPU. Only for regions
+// the GPU has not read yet (see the New3D patch in Scripts/sync-upstream.sh).
+void Super3GLES_UnsynchronizedUploads(int enable);
+void Super3GLES_BufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data);
 
 #ifdef __cplusplus
 }
@@ -32,6 +36,7 @@ void Super3GLES_DrawBuffer(GLenum buf);
 #define glCompileShader Super3GLES_CompileShader
 #define glReadPixels    Super3GLES_ReadPixels
 #define glDrawBuffer    Super3GLES_DrawBuffer
+#define glBufferSubData Super3GLES_BufferSubData
 #define glClearDepth(d) glClearDepthf((GLfloat)(d))
 
 #endif  // SUPER3_GLES_GLEW_SHIM_H

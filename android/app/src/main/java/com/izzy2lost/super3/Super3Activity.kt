@@ -112,6 +112,7 @@ class Super3Activity : SDLActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestSixtyHzDisplayMode()
 
         overlayControlsEnabled = prefs.getBoolean("overlay_controls_enabled", true)
         gyroSteeringEnabled = prefs.getBoolean("gyro_steering_enabled", false)
@@ -598,6 +599,33 @@ class Super3Activity : SDLActivity() {
         }
     }
 
+    // Games run at 60 frames per second. On a 120 Hz panel, frames would be shown for an
+    // uneven number of refreshes; at 60 Hz, vsync paces them evenly (see native-lib.cpp).
+    private fun requestSixtyHzDisplayMode() {
+        @Suppress("DEPRECATION")
+        val display = windowManager.defaultDisplay ?: return
+        val current = display.mode
+        val sixty = display.supportedModes
+            .filter { it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight }
+            .minByOrNull { kotlin.math.abs(it.refreshRate - 60f) }
+            ?: return
+        if (kotlin.math.abs(sixty.refreshRate - 60f) > 1f) return
+        window.attributes = window.attributes.apply { preferredDisplayModeId = sixty.modeId }
+    }
+
+    // SDL only reads the refresh rate at startup; tell the native side when it changes.
+    private val displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) {}
+        override fun onDisplayRemoved(displayId: Int) {}
+        override fun onDisplayChanged(displayId: Int) = reportRefreshRate()
+    }
+
+    private fun reportRefreshRate() {
+        @Suppress("DEPRECATION")
+        val rate = windowManager.defaultDisplay?.refreshRate ?: return
+        try { nativeSetDisplayRefreshRate(rate) } catch (_: UnsatisfiedLinkError) {}
+    }
+
     private fun angleDiffRad(a: Float, b: Float): Float {
         var d = a - b
         val twoPi = (Math.PI * 2.0).toFloat()
@@ -737,12 +765,17 @@ class Super3Activity : SDLActivity() {
 
     override fun onResume() {
         super.onResume()
+        getSystemService(android.hardware.display.DisplayManager::class.java)
+            ?.registerDisplayListener(displayListener, null)
+        reportRefreshRate()
         applyImmersiveMode()
         gyroSteeringEnabled = prefs.getBoolean("gyro_steering_enabled", false)
         startGyroSteering()
     }
 
     override fun onPause() {
+        getSystemService(android.hardware.display.DisplayManager::class.java)
+            ?.unregisterDisplayListener(displayListener)
         stopGyroSteering()
         super.onPause()
     }
@@ -1337,6 +1370,7 @@ class Super3Activity : SDLActivity() {
     private external fun nativeRequestLoadState(slot: Int): Boolean
     private external fun nativeGetLoadedGameName(): String?
     private external fun nativeSetGyroSteer(steer: Float): Boolean
+    private external fun nativeSetDisplayRefreshRate(hz: Float)
 
     private class SaveSlotAdapter(
         private val slots: List<SaveSlot>,

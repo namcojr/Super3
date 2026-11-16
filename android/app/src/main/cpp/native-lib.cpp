@@ -44,6 +44,7 @@ Util::Config::Node UpstreamDefaultConfig();
 static std::string JoinPath(const std::string& a, const std::string& b);
 
 static uint64_t g_perfCounterFrequency = 0;
+static std::atomic<float> g_displayRefreshHz{0.0f};  // reported by Super3Activity; SDL's value is only read at startup
 
 static uint64_t GetDesiredRefreshRateMilliHz(const Util::Config::Node& config)
 {
@@ -218,7 +219,8 @@ struct Super3Host {
     // Enable the core's sound-board thread so audio can stay smooth even if
     // rendering/input causes occasional stalls on Android.
     config.Set("MultiThreaded", true);
-    config.Set("GPUMultiThreaded", false);
+    // Emulated CPU and rendering run in parallel (upstream default): ~9 ms -> ~4 ms per frame on the Portal
+    config.Set("GPUMultiThreaded", true);
     config.Set("EmulateSound", true);
     config.Set("EmulateDSB", true);
     config.Set("Balance", "0");
@@ -1019,6 +1021,9 @@ extern "C" int SDL_main(int argc, char* argv[]) {
   bool running = true;
   uint32_t lastStatusLog = SDL_GetTicks();
   unsigned framesSinceLog = 0;
+  // Per-interval frame statistics (ms): worst and sum, for the periodic log line
+  struct { double runMax = 0, runSum = 0, swapMax = 0, swapSum = 0; unsigned ppcMax = 0, renderMax = 0, sndMax = 0, syncMax = 0, slow = 0; } stats;
+  auto msSince = [](uint64_t t0) { return (SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency(); };
   bool backgrounded = false;
   bool loggedControls = false;
   bool audioOpened = false;
@@ -1133,17 +1138,55 @@ extern "C" int SDL_main(int argc, char* argv[]) {
 
       // The core draws the whole frame: 2D bottom layer, 3D, 2D top layer.
       if (renderersReady)
+      {
+        const uint64_t t0 = SDL_GetPerformanceCounter();
         host.RunFrame();
+        const double ms = msSince(t0);
+        stats.runMax = std::max(stats.runMax, ms);
+        stats.runSum += ms;
+        if (ms > 16.7) stats.slow++;
+        if (host.model3) {
+          const FrameTimings ft = host.model3->GetTimings();
+          stats.ppcMax = std::max(stats.ppcMax, ft.ppcTicks);
+          stats.renderMax = std::max(stats.renderMax, ft.renderTicks);
+          stats.sndMax = std::max(stats.sndMax, ft.sndTicks);
+          stats.syncMax = std::max(stats.syncMax, ft.syncTicks);
+        }
+      }
     }
 
     if (state == 1) {
       RenderCrosshairsIfNeeded(host, presenter, xOff, yOff, xRes, yRes);
     }
 
-    SDL_GL_SwapWindow(window);
+    {
+      const uint64_t t0 = SDL_GetPerformanceCounter();
+      SDL_GL_SwapWindow(window);
+      const double ms = msSince(t0);
+      stats.swapMax = std::max(stats.swapMax, ms);
+      stats.swapSum += ms;
+    }
 
     const bool throttle = host.config["Throttle"].ValueAsDefault<bool>(true);
-    if (throttle) {
+    // With vsync on a display at the game's rate, SDL_GL_SwapWindow already paces
+    // frames; sleeping as well would drift against the display and drop frames.
+    bool vsyncPaced = false;
+    {
+      double displayHz = g_displayRefreshHz.load();
+      SDL_DisplayMode mode;
+      if (displayHz <= 0.0 && SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(window), &mode) == 0)
+        displayHz = mode.refresh_rate;
+      const double wantHz = GetDesiredRefreshRateMilliHz(host.config) / 1000.0;
+      if (host.config["VSync"].ValueAsDefault<bool>(true) && std::abs(displayHz - wantHz) <= 1.5)
+        vsyncPaced = true;
+      static int loggedPacing = 0;
+      const int pacingKey = (vsyncPaced ? 1 : -1) * (int)std::lround(displayHz);
+      if (loggedPacing != pacingKey) {
+        loggedPacing = pacingKey;
+        SDL_Log("Frame pacing: %s (display %.1f Hz, game %.2f Hz)", vsyncPaced ? "vsync" : "timer", displayHz, wantHz);
+      }
+    }
+    if (throttle && !vsyncPaced) {
       const uint64_t desiredRate = GetDesiredRefreshRateMilliHz(host.config);
       if (desiredRate != refreshRateMilliHz || perfCountPerFrame == 0) {
         refreshRateMilliHz = desiredRate;
@@ -1162,7 +1205,11 @@ extern "C" int SDL_main(int argc, char* argv[]) {
     uint32_t t = SDL_GetTicks();
     framesSinceLog++;
     if (t - lastStatusLog > 2000) {
-      SDL_Log("Main loop alive; loadState=%d fps=%.1f", state, framesSinceLog * 1000.0 / (t - lastStatusLog));
+      const unsigned n = std::max(framesSinceLog, 1u);
+      SDL_Log("Main loop alive; loadState=%d fps=%.1f | frame avg %.1f max %.1f ms, >16.7ms: %u | swap avg %.1f max %.1f | core max ms: ppc %u render %u snd %u sync %u",
+              state, framesSinceLog * 1000.0 / (t - lastStatusLog), stats.runSum / n, stats.runMax, stats.slow,
+              stats.swapSum / n, stats.swapMax, stats.ppcMax, stats.renderMax, stats.sndMax, stats.syncMax);
+      stats = {};
       lastStatusLog = t;
       framesSinceLog = 0;
     }
@@ -1217,6 +1264,12 @@ Java_com_izzy2lost_super3_Super3Activity_nativeGetLoadedGameName(JNIEnv* env, jo
   if (g_host->game.name.empty())
     return nullptr;
   return env->NewStringUTF(g_host->game.name.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_izzy2lost_super3_Super3Activity_nativeSetDisplayRefreshRate(JNIEnv*, jobject, jfloat hz)
+{
+  g_displayRefreshHz.store((float)hz);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

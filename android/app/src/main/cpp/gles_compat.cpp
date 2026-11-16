@@ -128,4 +128,26 @@ void Super3GLES_DrawBuffer(GLenum buf)
   glDrawBuffers(1, &buf);  // GL_BACK or GL_NONE
 }
 
+static bool s_unsynchronized = false;
+
+void Super3GLES_UnsynchronizedUploads(int enable)
+{
+  s_unsynchronized = enable != 0;
+}
+
+void Super3GLES_BufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data)
+{
+  // Unsynchronised: no GPU wait. (GL_MAP_INVALIDATE_RANGE_BIT makes Adreno copy the buffer, so it's left out.)
+  void* dst = (s_unsynchronized && size > 0)
+    ? glMapBufferRange(target, offset, size, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT)
+    : nullptr;
+  if (dst)
+  {
+    std::memcpy(dst, data, (size_t)size);
+    glUnmapBuffer(target);
+  }
+  else
+    glBufferSubData(target, offset, size, data);
+}
+
 }  // extern "C"
