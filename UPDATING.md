@@ -53,4 +53,4 @@ Remaining dips are GPU-bound at 1080p (they vanish at 720p).
 - `native-lib.cpp`: SUPER3's host loop, set up like upstream `Main.cpp`; vsync frame pacing at 60 Hz; `fps=` and frame-time breakdown in the log every 2 s
 - `render2d_android.cpp`: also fills the widescreen side bars with the picture's edge colour when the top 2D layer covers the whole 4:3 area
 - `Super3Activity.kt`: asks for the 60 Hz display mode and reports the refresh rate to native code
-- Upstream used as-is: `Src/OSD/{Logger,Outputs,Thread}.cpp`, `Src/OSD/SDL/Audio.cpp`, `Src/OSD/Unix/FileSystemPath.cpp`
+- Upstream used as-is: `Src/OSD/{Logger,Outputs,Thread}.cpp`, `Src/OSD/Unix/FileSystemPath.cpp` (`Src/OSD/SDL/Audio.cpp` via its patched copy)
