@@ -85,6 +85,7 @@ Util::Config::Node UpstreamDefaultConfig()
   config.Set("NoWhiteFlash", false, "Video");
   config.Set("FlipStereo", false, "Sound");
 #ifdef SUPERMODEL_WIN32
+  config.Set<std::string>("InputSystem", "dinput", "Core", "", "", { "sdl","sdlgamepad","dinput","xinput","rawinput" });
   SetLabels("InputSystem", { "SDL (joystick)", "SDL (gamepad)", "DirectInput", "XInput", "Raw Input (multiple mice/keyboards)" });
   // DirectInput ForceFeedback
   config.Set("DirectInputConstForceLeftMax", 100, "ForceFeedback", 0, 100);
@@ -104,6 +105,7 @@ Util::Config::Node UpstreamDefaultConfig()
   config.Set("SDLVibrateMax", 100, "ForceFeedback", 0, 100);
   config.Set("SDLConstForceThreshold", 30, "ForceFeedback", 0, 100);
 #else
+  config.Set<std::string>("InputSystem", "sdl", "Core", "", "", { "sdl","sdlgamepad" });
   SetLabels("InputSystem", { "SDL (joystick)", "SDL (gamepad)" });
   // SDL ForceFeedback
   config.Set("SDLConstForceMax", 100, "ForceFeedback", 0, 100);
