@@ -65,6 +65,15 @@ android {
         signingConfig = signingConfigs.getByName("release")
       }
     }
+    // Personal build: optimized like release, but installs alongside the Play
+    // Store app (separate app ID, debug-key signed). Name comes from src/personal/res.
+    create("personal") {
+      initWith(getByName("release"))
+      applicationIdSuffix = ".dev"
+      versionNameSuffix = "-personal"
+      signingConfig = signingConfigs.getByName("debug")
+      matchingFallbacks += listOf("release")
+    }
   }
 
   externalNativeBuild {
