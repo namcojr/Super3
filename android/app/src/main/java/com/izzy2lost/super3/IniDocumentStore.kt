@@ -27,7 +27,7 @@ object IniDocumentStore {
 
     fun writeIniText(context: Context, doc: DocumentFile, text: String): Boolean {
         return runCatching {
-            val out = context.contentResolver.openOutputStream(doc.uri) ?: return@runCatching false
+            val out = context.contentResolver.openOutputStream(doc.uri, "wt") ?: return@runCatching false
             out.writer(Charsets.UTF_8).use { it.write(text) }
             true
         }.getOrDefault(false)
@@ -92,7 +92,7 @@ object IniDocumentStore {
             }
         if (input == null) return
         input.use { ins ->
-            context.contentResolver.openOutputStream(doc.uri)?.use { outs ->
+            context.contentResolver.openOutputStream(doc.uri, "wt")?.use { outs ->
                 ins.copyTo(outs)
             }
         }

@@ -30,6 +30,7 @@ import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.checkbox.MaterialCheckBox
 import com.google.android.material.color.MaterialColors
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.navigation.NavigationView
@@ -70,10 +71,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusText: TextView
 
     private lateinit var btnResolution: MaterialButton
-    private lateinit var btnResolutionMatchDevice: MaterialButton
-    private lateinit var btnWidescreen: MaterialButton
-    private lateinit var btnWideBackground: MaterialButton
-    private lateinit var btnReal3dRenderer: MaterialButton
+    private lateinit var btnResolutionMatchDevice: MaterialCheckBox
+    private lateinit var btnWidescreen: MaterialCheckBox
+    private lateinit var btnWideBackground: MaterialCheckBox
+    private lateinit var btnReal3dRenderer: MaterialCheckBox
     private lateinit var btnDaytonaTiming: MaterialButton
 
     private lateinit var gamesAdapter: GamesAdapter
@@ -395,6 +396,13 @@ class MainActivity : AppCompatActivity() {
         loadPrefs()
         games = GameXml.parseGamesXmlFromAssets(this)
 
+        // Pull the user's settings in before installing defaults, so the video toggles and
+        // Supermodel.ini edits made from this screen start from the user's file, not the defaults.
+        userTreeUri?.let { tree ->
+            runCatching {
+                UserDataSync.syncFromTreeIntoInternal(this, tree, internalUserRoot(), UserDataSync.DIRS_SETTINGS_ONLY)
+            }
+        }
         AssetInstaller.ensureInstalled(this, internalUserRoot())
 
         applyViewMode(viewMode)
@@ -816,7 +824,8 @@ class MainActivity : AppCompatActivity() {
                 )
             applyUi(updated)
             persistAndApply(updated)
-            Toast.makeText(this, "Resolution set to ${next.label} (${next.x}x${next.y})", Toast.LENGTH_SHORT).show()
+            val note = if (leavingMatchMode) "; widescreen turned off" else ""
+            Toast.makeText(this, "Resolution set to ${next.label} (${next.x}x${next.y})$note", Toast.LENGTH_SHORT).show()
         }
 
         btnResolutionMatchDevice.setOnClickListener {

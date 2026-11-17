@@ -4,6 +4,14 @@ import android.content.Context
 import java.io.File
 
 object AssetInstaller {
+    /**
+     * Timestamp given to files freshly copied from the APK. UserDataSync keeps whichever copy is
+     * newer, so a just-installed default must look older than anything in the user's data folder;
+     * otherwise a reinstall (or a cleared internal folder) would push the defaults over the
+     * user's own Supermodel.ini.
+     */
+    const val BUNDLED_DEFAULT_MTIME = 1000L
+
     fun ensureInstalled(context: Context, internalUserRoot: File) {
         internalUserRoot.mkdirs()
 
@@ -38,6 +46,7 @@ object AssetInstaller {
                         input.copyTo(output)
                     }
                 }
+                if (!alwaysRefresh) dest.setLastModified(BUNDLED_DEFAULT_MTIME)
             }
             return
         }
@@ -51,6 +60,9 @@ object AssetInstaller {
     private fun migrateSupermodelIni(ini: File) {
         if (!ini.exists()) return
 
+        // A still-untouched bundled default must keep its old timestamp after migration (see
+        // BUNDLED_DEFAULT_MTIME); a user's own file gets a fresh one so the migration syncs out.
+        val wasBundledDefault = ini.lastModified() <= BUNDLED_DEFAULT_MTIME
         val lines = runCatching { ini.readLines() }.getOrNull() ?: return
         var changed = false
         val replacements =
@@ -164,5 +176,6 @@ object AssetInstaller {
 
         if (!changed) return
         runCatching { ini.writeText(out.joinToString(System.lineSeparator())) }
+        if (wasBundledDefault) ini.setLastModified(BUNDLED_DEFAULT_MTIME)
     }
 }

@@ -85,7 +85,7 @@ object UserDataSync {
         val existing = toDir.findFile(from.name)
         if (!shouldCopyFileToDoc(from, existing)) return
         val outDoc = existing ?: toDir.createFile("application/octet-stream", from.name) ?: return
-        resolver.openOutputStream(outDoc.uri)?.use { output ->
+        resolver.openOutputStream(outDoc.uri, "wt")?.use { output ->
             from.inputStream().use { input ->
                 input.copyTo(output)
             }
