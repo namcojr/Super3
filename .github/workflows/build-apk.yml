@@ -43,7 +43,11 @@ jobs:
             echo "::error::KEYSTORE_BASE64 secret is not set; refusing to build an unsigned release"
             exit 1
           fi
-          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # Ignore line breaks/spaces picked up when the value was copied
+          if ! printf '%s' "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > "$RUNNER_TEMP/release.jks"; then
+            echo "::error::KEYSTORE_BASE64 is not valid base64; re-copy it from: base64 -w0 your-key.jks"
+            exit 1
+          fi
           cat > android/key.properties <<EOF
           storeFile=$RUNNER_TEMP/release.jks
           storePassword=$KEYSTORE_PASSWORD
