@@ -5,13 +5,17 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.content.res.Configuration
+import android.graphics.Color
 import android.text.method.LinkMovementMethod
 import android.text.util.Linkify
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -32,6 +36,7 @@ import com.google.android.material.navigation.NavigationView
 import com.google.android.material.search.SearchBar
 import com.google.android.material.search.SearchView
 import java.io.File
+import java.lang.ref.WeakReference
 import java.util.ArrayDeque
 import kotlin.math.max
 import kotlin.math.min
@@ -40,6 +45,12 @@ import kotlin.concurrent.thread
 enum class GameListViewMode { LIST, FLYERS }
 
 class MainActivity : AppCompatActivity() {
+    private companion object {
+        // Survive recreation of the loading screen during a frontend launch. Main thread only.
+        var externalLaunchHost: WeakReference<MainActivity>? = null
+        var externalLaunchInFlight = false
+    }
+
     private val prefs by lazy { getSharedPreferences("super3_prefs", MODE_PRIVATE) }
 
     private lateinit var drawerLayout: DrawerLayout
@@ -79,6 +90,10 @@ class MainActivity : AppCompatActivity() {
 
     @Volatile
     private var launchingRomIntent = false
+
+    /** True when this instance was started by a frontend to boot a ROM directly. */
+    private var externalLaunch = false
+    private var externalStatusText: TextView? = null
 
     @Volatile
     private var syncingFlyers = false
@@ -170,6 +185,12 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         applyThemeFromPrefs()
         pendingRomLaunch = parseRomLaunchIntent(intent)
+        pendingRomLaunch?.let { info ->
+            // Launched by a frontend (ES-DE etc.): skip the game list entirely.
+            pendingRomLaunch = null
+            beginExternalLaunch(intent, info, isRecreation = savedInstanceState != null)
+            return
+        }
         if (!prefs.getBoolean("setup_complete", false)) {
             val hasGames = prefs.getString("gamesTreeUri", null) != null
             val hasData = prefs.getString("userTreeUri", null) != null
@@ -378,10 +399,61 @@ class MainActivity : AppCompatActivity() {
 
         applyViewMode(viewMode)
         refreshUi()
-        pendingRomLaunch?.let { info ->
-            handleRomLaunchIntent(intent, info)
-            pendingRomLaunch = null
+    }
+
+    /**
+     * Frontend launch: show only a loading screen, prepare the ROM(s) and start the game in a
+     * cleared task, so that exiting the game returns straight to the frontend instead of the
+     * game list. On failure, report it and finish so the frontend gets control back.
+     */
+    private fun beginExternalLaunch(launchIntent: Intent, info: RomLaunchInfo, isRecreation: Boolean) {
+        externalLaunch = true
+        externalLaunchHost = WeakReference(this)
+        applyImmersiveMode()
+        setContentView(buildExternalLaunchView())
+        // Recreated mid-launch (e.g. rotation): the launch already under way will finish this instance.
+        if (isRecreation && externalLaunchInFlight) return
+        externalLaunchInFlight = true
+        handleRomLaunchIntent(launchIntent, info)
+    }
+
+    private fun buildExternalLaunchView(): View {
+        val label =
+            TextView(this).apply {
+                setTextColor(Color.WHITE)
+                textSize = 16f
+                gravity = Gravity.CENTER
+                setPadding(0, (16 * resources.displayMetrics.density).toInt(), 0, 0)
+            }
+        externalStatusText = label
+        val column =
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                addView(ProgressBar(this@MainActivity))
+                addView(label)
+            }
+        return FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(
+                column,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER,
+                ),
+            )
         }
+    }
+
+    /** Main thread only. Closes the loading screen of an external launch, without animation. */
+    private fun finishExternalLaunch() {
+        externalLaunchInFlight = false
+        val host = externalLaunchHost?.get() ?: this
+        externalLaunchHost = null
+        host.finish()
+        @Suppress("DEPRECATION")
+        host.overridePendingTransition(0, 0)
     }
 
     private fun applyThemeFromPrefs() {
@@ -523,7 +595,7 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         parseRomLaunchIntent(intent)?.let { info ->
-            handleRomLaunchIntent(intent, info)
+            if (!launchingRomIntent) beginExternalLaunch(intent, info, isRecreation = false)
         }
     }
 
@@ -1109,6 +1181,15 @@ class MainActivity : AppCompatActivity() {
         if (::statusText.isInitialized) {
             statusText.text = text
         }
+        externalStatusText?.text = text
+    }
+
+    private fun reportRomLaunchFailure(msg: String) {
+        runOnUiThread {
+            updateStatus(msg)
+            Toast.makeText(applicationContext, msg, Toast.LENGTH_LONG).show()
+            if (externalLaunch) finishExternalLaunch()
+        }
     }
 
     private fun maybePersistReadPermission(intent: Intent, uri: Uri) {
@@ -1214,11 +1295,7 @@ class MainActivity : AppCompatActivity() {
                         copyUriToCacheIfNeeded(info.uri, info.size, mainOut)
                     }
                 if (!mainOk) {
-                    runOnUiThread {
-                        val msg = "Failed to open ${info.displayName}"
-                        updateStatus(msg)
-                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                    }
+                    reportRomLaunchFailure("Failed to open ${info.displayName}")
                     return@thread
                 }
 
@@ -1238,11 +1315,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 if (missing.isNotEmpty()) {
-                    runOnUiThread {
-                        val msg = "Missing required ZIP(s): ${missing.joinToString(", ")}"
-                        updateStatus(msg)
-                        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-                    }
+                    reportRomLaunchFailure("Missing required ZIP(s): ${missing.joinToString(", ")}")
                     return@thread
                 }
 
@@ -1258,8 +1331,20 @@ class MainActivity : AppCompatActivity() {
                             putExtra("gamesXmlPath", gamesXmlPath)
                             putExtra("userDataRoot", userDataRoot)
                         }
-                    startActivity(launch)
+                    if (externalLaunch) {
+                        // Own, cleared task: nothing of SUPER3 stays underneath the game, so
+                        // exiting it hands control straight back to the frontend.
+                        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                        Super3Activity.finishRunningGame {
+                            applicationContext.startActivity(launch)
+                            finishExternalLaunch()
+                        }
+                    } else {
+                        startActivity(launch)
+                    }
                 }
+            } catch (t: Throwable) {
+                reportRomLaunchFailure("Failed to start ${info.displayName}: ${t.message ?: t.javaClass.simpleName}")
             } finally {
                 launchingRomIntent = false
             }

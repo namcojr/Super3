@@ -33,6 +33,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.io.File
 import java.io.FileOutputStream
+import java.lang.ref.WeakReference
 import java.text.DateFormat
 import java.util.Date
 import kotlin.concurrent.thread
@@ -43,8 +44,29 @@ import org.libsdl.app.SDLActivity
  * library specified by SDL_MAIN_LIBRARY (set to "super3" in the manifest).
  */
 class Super3Activity : SDLActivity() {
-    private companion object {
+    companion object {
         private const val COMBO_WINDOW_MS = 120L
+
+        // SDLActivity keeps its state in statics, so two game activities must never overlap.
+        // These are only touched on the main thread.
+        private var liveInstance: WeakReference<Super3Activity>? = null
+        private val onGameGone = ArrayList<() -> Unit>()
+
+        /**
+         * Main thread only. Finishes the game that is still running (e.g. left in the
+         * background), then calls [then] once it is fully torn down. Calls [then]
+         * right away when no game is running.
+         */
+        fun finishRunningGame(then: () -> Unit) {
+            val running = liveInstance?.get()
+            if (running == null || running.isDestroyed) {
+                liveInstance = null
+                then()
+                return
+            }
+            onGameGone.add(then)
+            if (!running.isFinishing) running.finish()
+        }
     }
 
     private val prefs by lazy { getSharedPreferences("super3_prefs", MODE_PRIVATE) }
@@ -112,6 +134,7 @@ class Super3Activity : SDLActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        liveInstance = WeakReference(this)
         requestSixtyHzDisplayMode()
 
         overlayControlsEnabled = prefs.getBoolean("overlay_controls_enabled", true)
@@ -761,6 +784,12 @@ class Super3Activity : SDLActivity() {
         }
         overlayView = null
         super.onDestroy()
+        if (liveInstance?.get() === this) {
+            liveInstance = null
+            val pending = onGameGone.toList()
+            onGameGone.clear()
+            pending.forEach { it() }
+        }
     }
 
     override fun onResume() {
