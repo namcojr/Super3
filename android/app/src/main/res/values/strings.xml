@@ -1,7 +1,7 @@
 <resources>
-  <string name="app_name">SUPER3</string>
+  <string name="app_name">SUPER3 Upstream</string>
   <string name="about">About</string>
-  <string name="about_title">About SUPER3</string>
+  <string name="about_title">About SUPER3 Upstream</string>
   <string name="game_menu_save_state">Save state</string>
   <string name="game_menu_exit_game">Exit game</string>
   <string name="save_state_dialog_title">Save states</string>
@@ -31,7 +31,7 @@
   <string name="timing_new_game">Timing: New (this game only)</string>
   <string name="timing_note">Note: Changing timing can fix some games and break others. Restart the game after switching.</string>
   <string name="quick_menu_exit_game">Exit game</string>
-  <string name="setup_title">Welcome to SUPER3</string>
+  <string name="setup_title">Welcome to SUPER3 Upstream</string>
   <string name="setup_subtitle">Quick setup for your folders.</string>
   <string name="setup_games_title">Choose your games folder</string>
   <string name="setup_games_body">SUPER3 does not include games, ROMs, or BIOS files. Pick a folder that already contains your Model 3 ZIPs.</string>

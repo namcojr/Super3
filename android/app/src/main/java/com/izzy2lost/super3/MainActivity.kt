@@ -561,20 +561,20 @@ class MainActivity : AppCompatActivity() {
         val aboutText: TextView = view.findViewById(R.id.about_text)
         aboutText.text =
             """
-            SUPER3 is an open-source Sega Model 3 emulator for Android.
+            SUPER3 Upstream is an open-source Sega Model 3 emulator for Android, a fork of SUPER3 by izzy2lost.
 
-            Sources used:
+            App source code:
+            https://github.com/namcojr/Super3
+
+            Based on:
+            https://github.com/izzy2lost/Super3
             https://github.com/trzy/Supermodel
             https://github.com/DirtBagXon/model3emu-code-sinden/tree/arm
 
             License (GPLv3):
             https://www.gnu.org/licenses/gpl-3.0.en.html
 
-            App source code:
-            https://github.com/izzy2lost/Super3
-
-            Privacy policy:
-            https://www.izzy2lost.com/super3-privacy
+            Privacy: no data is collected. Emulation works offline; the flyer view may download artwork from GitHub.
 
             Disclaimers:
             - No games/ROMs/BIOS included.
