@@ -17,6 +17,8 @@ tables, `generated/UpstreamDefaultConfig.cpp` and the patched copies below.
 
 Then run a game and check the log: `adb logcat | grep -E 'SDL/APP|SDL/RENDER'`
 (`fps=` every 2 s; shader errors print with numbered source).
+Only the personal build logs; release builds write nothing to logcat
+(`SUPER3_LOGGING` in `CMakeLists.txt`, `BuildConfig.LOGGING`, `proguard-rules.pro`).
 
 ## Where things break, and where to fix them
 

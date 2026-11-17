@@ -139,3 +139,30 @@ target_link_libraries(super3 PRIVATE
   SDL2::SDL2 # present when SUPER3_FETCH_SDL2 is ON
   ${SDL2_NET_TARGET}
 )
+
+# Logging. Release builds write nothing to the Android log: every liblog call in
+# SUPER3, SDL2 and SDL2_net is redirected to the no-op functions in nolog.c.
+# The personal build passes -DSUPER3_LOGGING=ON (fps and frame-time lines, shader errors).
+option(SUPER3_LOGGING "Write to the Android log (logcat)" OFF)
+if(NOT SUPER3_LOGGING)
+  set(SUPER3_NOLOG_WRAP
+    -Wl,--wrap=__android_log_write
+    -Wl,--wrap=__android_log_print
+    -Wl,--wrap=__android_log_vprint
+    -Wl,--wrap=__android_log_buf_write
+    -Wl,--wrap=__android_log_buf_print
+    -Wl,--wrap=__android_log_write_log_message
+  )
+  foreach(lib super3 SDL2::SDL2 ${SDL2_NET_TARGET})
+    set(real "${lib}")
+    get_target_property(aliased "${lib}" ALIASED_TARGET)
+    if(aliased)
+      set(real "${aliased}")
+    endif()
+    get_target_property(type "${real}" TYPE)
+    if(type STREQUAL "SHARED_LIBRARY")
+      target_sources("${real}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/nolog.c")
+      target_link_options("${real}" PRIVATE ${SUPER3_NOLOG_WRAP})
+    endif()
+  endforeach()
+endif()

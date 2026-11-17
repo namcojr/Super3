@@ -21,6 +21,10 @@ val hasReleaseKeystore = hasKeystoreProperties &&
 android {
   namespace = "com.izzy2lost.super3"
   compileSdk = 36
+
+  buildFeatures {
+    buildConfig = true
+  }
   buildToolsVersion = "36.1.0"
   ndkVersion = "29.0.14206865"
 
@@ -32,6 +36,9 @@ android {
 
     versionCode = 24
     versionName = "1.3.0"
+
+    // Off: nothing is written to the Android log (Super3App, proguard-rules.pro, CMakeLists.txt)
+    buildConfigField("boolean", "LOGGING", "false")
 
     ndk {
       abiFilters += listOf("arm64-v8a")
@@ -57,7 +64,8 @@ android {
 
   buildTypes {
     release {
-      isMinifyEnabled = false
+      // R8 strips every android.util.Log call (proguard-rules.pro); native logging is off by default (CMakeLists.txt)
+      isMinifyEnabled = true
       proguardFiles(
         getDefaultProguardFile("proguard-android-optimize.txt"),
         "proguard-rules.pro"
@@ -72,6 +80,14 @@ android {
       initWith(getByName("release"))
       versionNameSuffix = "-personal"
       isDebuggable = project.hasProperty("migrate")
+      // Keeps logging: fps/frame-time lines and shader errors in logcat (see UPDATING.md)
+      buildConfigField("boolean", "LOGGING", "true")
+      isMinifyEnabled = false
+      externalNativeBuild {
+        cmake {
+          arguments += "-DSUPER3_LOGGING=ON"
+        }
+      }
       signingConfig = signingConfigs.getByName("debug")
       matchingFallbacks += listOf("release")
     }
